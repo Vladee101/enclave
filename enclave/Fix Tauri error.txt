@@ -1,0 +1,55 @@
+Fix the Tauri state-management error blocking user creation. Clicking
+"Create Profile" fails with: "state not managed for field `pool` on command
+`cmd_create_user`. You must call `.manage()` before using this command."
+
+ROOT CAUSE
+The DB-backed commands inject a managed pool via `State<…>`, but nothing is
+registered with `.manage()` in the app builder. The app must build its database
+connection state at startup and register it before any command runs.
+
+TASK
+1. In `src-tauri/src/lib.rs`, define an `AppState` holding TWO sqlx PgPools:
+     - `app_pool`   — connects as the `app_user` role (RLS-enforced; normal
+                      user-facing queries go here)
+     - `admin_pool` — connects as a privileged role (provisioning only)
+   Read both connection strings from env vars `APP_DATABASE_URL` and
+   `ADMIN_DATABASE_URL`. Do NOT hardcode credentials.
+
+2. Build the state in the Tauri `.setup()` hook. Pool construction is async and
+   `run()` is sync, so use `tauri::async_runtime::block_on(...)`, then
+   `app.manage(state)`. If either pool fails to connect, return the error from
+   setup with a clear message (it's expected that the window won't open until
+   Postgres is reachable).
+
+3. Update every command that currently injects a bare `pool` to take
+   `state: tauri::State<'_, AppState>` instead, and select the correct pool
+   inside the command body. The managed type and the `State<T>` type must match
+   exactly.
+
+4. Route provisioning through `admin_pool`, NOT `app_pool`. `cmd_create_user`
+   (and anything that grants a `memberships` row) must use `admin_pool`, because
+   `memberships` has RLS with only a SELECT policy — inserts from `app_user` are
+   denied by design (see docs/adr/0008). User-facing queries (ask/retrieve,
+   list documents) use `app_pool`.
+
+5. Hash the PIN with argon2 before storing it in `users.password_hash`. Never
+   store the raw PIN. Add the `argon2` crate if not present.
+
+6. So the first profile is actually usable, have the create-user flow also
+   create a default department and an admin `memberships` row for the new user,
+   all via `admin_pool` in a single transaction. Use the seeded `member`/admin
+   roles from schema.sql.
+
+CONSTRAINTS — read docs/adr/ and CLAUDE.md first; do not violate the invariants:
+- `app_pool` MUST connect as a non-superuser, non-BYPASSRLS role. Never widen it.
+- Do not disable, weaken, or work around RLS to make provisioning "easier" —
+  use `admin_pool` instead.
+- Do not modify db/schema.sql, the ADRs, retrieval.rs, or ingest.rs APIs.
+- Keep command logic thin; no business logic invented beyond what's specified.
+
+ACCEPTANCE
+- `cargo check` passes from `src-tauri/`.
+- With Postgres running (pgvector), schema.sql applied, roles present, and both
+  env vars set, `npm run tauri dev` launches and "Create Profile" inserts a user
+  + department + membership and returns the new user id without the state error.
+- Report exactly which files you changed and which env vars must be set to run.

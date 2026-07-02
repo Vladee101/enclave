@@ -1,0 +1,48 @@
+[package]
+name = "enclave"
+version = "0.1.0"
+description = "Enclave — On-premises corporate RAG + LoRA desktop application"
+authors = ["Vlad (Softwarean)"]
+edition = "2021"
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "enclave_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# async runtime
+tokio = { version = "1", features = ["full"] }
+
+# database
+sqlx = { version = "0.8", features = ["runtime-tokio-native-tls", "postgres", "uuid", "chrono", "json"] }
+
+# HTTP client for llama-server
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# error handling
+anyhow = "1"
+thiserror = "2"
+
+# logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# utilities
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
+time = "=0.3.36"
+argon2 = { version = "0.5", features = ["std"] }
+sha2 = "0.10"

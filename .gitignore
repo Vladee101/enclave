@@ -1,0 +1,17 @@
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+.idea
+*.swp
+
+# Env files (never commit real secrets/connection strings)
+.env
+.env.*
+
+# Claude Code local settings — machine-specific, and this one has a real
+# local Postgres password baked into its permission allowlist.
+.claude/settings.local.json

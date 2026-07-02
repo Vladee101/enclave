@@ -1,0 +1,48 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Enclave",
+  "version": "0.1.0",
+  "identifier": "com.softwarean.enclave",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Enclave",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 960,
+        "minHeight": 600,
+        "resizable": true,
+        "decorations": true,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "publisher": "Softwarean™",
+    "copyright": "© 2026 Softwarean™. All rights reserved.",
+    "category": "Productivity",
+    "shortDescription": "On-premises corporate RAG + LoRA assistant",
+    "longDescription": "Enclave is an on-premises, data-sovereign desktop application for corporate retrieval-augmented generation with per-department LoRA adapters (ADR-0002, ADR-0004). Inference, embeddings, and document storage all stay on the local machine.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "externalBin": [
+      "binaries/llama-server"
+    ]
+  }
+}
