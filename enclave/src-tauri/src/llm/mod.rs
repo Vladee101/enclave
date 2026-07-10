@@ -12,8 +12,24 @@ use tracing::{info, warn};
 
 pub mod adapters;
 
-/// Shared HTTP client for the llama-server sidecar.
+/// Name of the embedding model row this sidecar registers in
+/// `embedding_models` (ADR-0007). Change this if you swap in a different
+/// embedding GGUF — but the dimension must stay 768 to match the
+/// `vector(768)` column on `chunk_embeddings`.
+const EMBEDDING_MODEL_NAME: &str = "nomic-embed-text-v1.5";
+const EMBEDDING_MODEL_DIMENSION: i32 = 768;
+
+/// Shared HTTP client for the llama-server sidecar(s).
 /// Managed as Tauri state after `LlmClient::spawn()`.
+///
+/// Two separate llama-server processes run, not one: `base_url` (port 8080)
+/// serves the resident chat/completion model (Qwen 2.5 7B) plus LoRA
+/// adapters, and `embed_base_url` (port 8081, `Option` because it's fine for
+/// chat to work without it) serves a *separate* small embedding model. They
+/// must be separate because `chunk_embeddings.embedding` is a fixed
+/// `vector(768)` (ADR-0007) and the chat model's native hidden dimension is
+/// nowhere near 768 — reusing it for `/embeddings` would produce
+/// wrong-sized (and low-quality) vectors.
 ///
 /// `adapter_index` maps an adapter's on-disk path (as stored in
 /// `department_adapters.adapter_path`) to the integer id llama-server
@@ -23,14 +39,19 @@ pub mod adapters;
 pub struct LlmClient {
     pub http: Client,
     pub base_url: String,
+    pub embed_base_url: Option<String>,
     adapter_index: Arc<RwLock<HashMap<String, u32>>>,
 }
 
 impl LlmClient {
-    /// Spawn the llama-server sidecar, preload every currently-active
-    /// LoRA adapter, and wait until the server is healthy.
+    /// Spawn both llama-server sidecars, preload every currently-active
+    /// LoRA adapter on the chat one, and wait until each is healthy. The
+    /// embedding sidecar is best-effort: if it can't start (no model file
+    /// yet, still on Stage 1 of setup), chat keeps working and only
+    /// ingestion fails, with a clear error, until it's fixed.
     pub async fn spawn(app: &AppHandle, pool: &PgPool) -> Result<Self> {
         let base_url = "http://127.0.0.1:8080".to_string();
+        let http = Client::new();
 
         // Preload adapters at startup (--lora-init-without-apply loads them
         // into memory without activating any; per-request selection happens
@@ -57,10 +78,13 @@ impl LlmClient {
         // Tauri sidecar path is declared in tauri.conf.json under bundle.externalBin.
         // The binary name must match the pattern: binaries/llama-server-<target-triple>
         info!("Spawning llama-server sidecar with {} adapter(s)…", adapter_paths.len());
-        let shell = app.shell();
         let mut args: Vec<String> = vec![
             "--port".into(), "8080".into(),
             "--lora-init-without-apply".into(),
+            // --n-gpu-layers 999: offload as many layers as fit into VRAM;
+            // llama.cpp clips to what actually fits, so this is safe on any
+            // GPU (falls back toward CPU if none/small).
+            "--n-gpu-layers".into(), "999".into(),
             // Model path is resolved from app data dir at runtime.
             // Placeholder: users configure via the Admin page.
             "--model".into(), "models/base.gguf".into(),
@@ -70,6 +94,7 @@ impl LlmClient {
             args.push(path.clone());
         }
 
+        let shell = app.shell();
         let (_rx, _child) = shell
             .sidecar("llama-server")
             .context("llama-server sidecar not found — did you run fetch-sidecar.ps1?")?
@@ -77,29 +102,71 @@ impl LlmClient {
             .spawn()
             .context("Failed to spawn llama-server")?;
 
-        // Wait for the server to be ready (up to 60 s).
-        let http = Client::new();
-        let health_url = format!("{base_url}/health");
-        let mut attempts = 0u32;
-        loop {
-            attempts += 1;
-            if attempts > 120 {
-                anyhow::bail!("llama-server did not become ready after 60 s");
-            }
-            match http.get(&health_url).send().await {
-                Ok(r) if r.status().is_success() => break,
-                _ => {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                }
-            }
-        }
-        info!("llama-server ready at {base_url}");
+        wait_for_health(&http, &base_url, 120).await.context("llama-server (chat) did not become ready")?;
+        info!("llama-server (chat) ready at {base_url}");
 
-        let client = Self { http, base_url, adapter_index: Arc::new(RwLock::new(HashMap::new())) };
+        let embed_base_url = match Self::spawn_embedding_sidecar(app, &http, pool).await {
+            Ok(url) => Some(url),
+            Err(e) => {
+                warn!(
+                    "Embedding sidecar unavailable, chat will still work but ingestion cannot embed \
+                     documents until this is fixed: {e:#}"
+                );
+                None
+            }
+        };
+
+        let client = Self { http, base_url, embed_base_url, adapter_index: Arc::new(RwLock::new(HashMap::new())) };
         if let Err(e) = client.refresh_adapter_index().await {
             warn!("Could not read adapter index from sidecar: {e:#}");
         }
         Ok(client)
+    }
+
+    /// Spawn the second llama-server, loaded with a small dedicated
+    /// embedding model on a different port, and register it in
+    /// `embedding_models` (ADR-0007) so `ingest/mod.rs`'s "active model"
+    /// lookup finds it. Returns the embedding server's base URL on success.
+    async fn spawn_embedding_sidecar(app: &AppHandle, http: &Client, pool: &PgPool) -> Result<String> {
+        let base_url = "http://127.0.0.1:8081".to_string();
+
+        let shell = app.shell();
+        let (_rx, _child) = shell
+            .sidecar("llama-server")
+            .context("llama-server sidecar not found — did you run fetch-sidecar.ps1?")?
+            .args([
+                "--port", "8081",
+                "--embedding",
+                "--n-gpu-layers", "999",
+                // Place a small embedding GGUF (e.g. nomic-embed-text-v1.5,
+                // ~80-150MB quantized) here — separate from the chat model.
+                "--model", "models/embed.gguf",
+            ])
+            .spawn()
+            .context("Failed to spawn embedding llama-server")?;
+
+        wait_for_health(http, &base_url, 60).await.context("embedding llama-server did not become ready")?;
+        info!("llama-server (embedding) ready at {base_url}");
+
+        // Exactly one active embedding model at a time — ingest/mod.rs picks
+        // whichever row has is_active = true. Deactivate any other first so
+        // re-registering on restart doesn't leave two active rows.
+        let mut tx = pool.begin().await?;
+        sqlx::query("UPDATE embedding_models SET is_active = false").execute(&mut *tx).await?;
+        sqlx::query(
+            r#"
+            INSERT INTO embedding_models (name, dimension, provider, is_active)
+            VALUES ($1, $2, 'llama.cpp', true)
+            ON CONFLICT (name) DO UPDATE SET is_active = true, dimension = EXCLUDED.dimension
+            "#,
+        )
+        .bind(EMBEDDING_MODEL_NAME)
+        .bind(EMBEDDING_MODEL_DIMENSION)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+
+        Ok(base_url)
     }
 
     /// Query the sidecar for the adapters it actually has loaded and cache
@@ -212,8 +279,14 @@ impl LlmClient {
         Ok(full)
     }
 
-    /// POST /embeddings  (returns a flat f32 vector).
+    /// POST /embeddings on the *embedding* sidecar (never the chat one —
+    /// see the struct doc comment on why they're separate processes).
     pub async fn embed(&self, content: &str) -> Result<Vec<f32>> {
+        let embed_base_url = self
+            .embed_base_url
+            .as_deref()
+            .context("Embedding model not available — the embedding llama-server sidecar isn't running")?;
+
         #[derive(Serialize)]
         struct EmbedReq<'a> {
             content: &'a str,
@@ -224,7 +297,7 @@ impl LlmClient {
         }
         let resp: EmbedResp = self
             .http
-            .post(format!("{}/embeddings", self.base_url))
+            .post(format!("{embed_base_url}/embeddings"))
             .json(&EmbedReq { content })
             .send()
             .await?
@@ -232,6 +305,23 @@ impl LlmClient {
             .json()
             .await?;
         Ok(resp.embedding)
+    }
+}
+
+/// Poll `{base_url}/health` until it responds successfully or `max_attempts`
+/// (at 500ms apart) are exhausted.
+async fn wait_for_health(http: &Client, base_url: &str, max_attempts: u32) -> Result<()> {
+    let health_url = format!("{base_url}/health");
+    let mut attempts = 0u32;
+    loop {
+        attempts += 1;
+        if attempts > max_attempts {
+            anyhow::bail!("server at {base_url} did not become ready after {} attempts", max_attempts);
+        }
+        match http.get(&health_url).send().await {
+            Ok(r) if r.status().is_success() => return Ok(()),
+            _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
+        }
     }
 }
 

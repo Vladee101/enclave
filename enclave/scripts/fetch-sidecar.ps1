@@ -78,4 +78,33 @@ Write-Host "Placed sidecar at: $dest"
 Remove-Item $tmpZip -Force
 Remove-Item $tmpDir -Recurse -Force
 
+# CUDA builds need the matching CUDA runtime DLLs alongside the exe, or it
+# launches and silently does nothing (no error, no listening port). Not
+# needed for the ARM64/CPU (noavx) fallback builds.
+if (-not $isArm64 -and $asset.name -like "*-cuda-*") {
+    $cudartPattern = "cudart-llama-bin-win-cuda-*-x64.zip"
+    $cudartAsset = $assets | Where-Object { $_.name -like $cudartPattern } | Select-Object -First 1
+
+    if ($cudartAsset) {
+        Write-Host "Downloading CUDA runtime: $($cudartAsset.name)"
+        $cudaZip = Join-Path $env:TEMP "llama-cudart.zip"
+        Invoke-WebRequest -Uri $cudartAsset.browser_download_url -OutFile $cudaZip -UseBasicParsing
+
+        $cudaDir = Join-Path $env:TEMP "llama-cudart-extract"
+        if (Test-Path $cudaDir) { Remove-Item $cudaDir -Recurse -Force }
+        Expand-Archive -Path $cudaZip -DestinationPath $cudaDir
+
+        $dlls = Get-ChildItem $cudaDir -Recurse -Filter "*.dll"
+        foreach ($dll in $dlls) {
+            Copy-Item $dll.FullName -Destination $OutDir -Force
+        }
+        Write-Host "Placed $($dlls.Count) CUDA runtime DLL(s) in: $OutDir"
+
+        Remove-Item $cudaZip -Force
+        Remove-Item $cudaDir -Recurse -Force
+    } else {
+        Write-Warning "No CUDA runtime asset found for $Version. The CUDA build of llama-server.exe will launch and silently exit without these DLLs — download 'cudart-llama-bin-win-cuda-*-x64.zip' from the same release manually and extract its DLLs into $OutDir."
+    }
+}
+
 Write-Host "Done. You can now run the build/check."
