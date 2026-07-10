@@ -1,6 +1,24 @@
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+const TEST_DB_NAME: &str = "enclave_rls_test";
+
+/// Swap the database name in a Postgres connection URL, keeping the host,
+/// port, credentials, and any query string intact.
+fn with_database(url: &str, db_name: &str) -> String {
+    let (base, query) = match url.split_once('?') {
+        Some((b, q)) => (b, Some(q)),
+        None => (url, None),
+    };
+    let last_slash = base.rfind('/').expect("connection URL must contain a path");
+    let mut new_url = format!("{}/{}", &base[..last_slash], db_name);
+    if let Some(q) = query {
+        new_url.push('?');
+        new_url.push_str(q);
+    }
+    new_url
+}
+
 /// Proves ADR-0008 (department-scoped RLS) holds — the release-blocking
 /// check CLAUDE.md's "Verification" section calls for.
 ///
@@ -9,6 +27,18 @@ use uuid::Uuid;
 /// role, RLS-enforced). If either is unset, this silently no-ops instead of
 /// failing, so a bare `cargo test` in an environment with no disposable
 /// Postgres instance doesn't error out.
+///
+/// Whatever database name is in TEST_ADMIN_URL/TEST_APP_URL is ignored and
+/// replaced with a dedicated `enclave_rls_test` database, dropped and
+/// recreated fresh each run, on the same Postgres server. This used to
+/// TRUNCATE and seed directly into whatever database those URLs pointed at
+/// — harmless if they're disposable, but if someone points them at the same
+/// database as ADMIN_DATABASE_URL/APP_DATABASE_URL (an easy thing to do, and
+/// exactly what happened once already — the `alice`/`bob`/HR/Engineering
+/// fixtures this test creates ended up permanently sitting in the real dev
+/// database), it silently destroys real data. Roles (`app_user`,
+/// `ingest_worker`, etc.) are cluster-wide so they're unaffected either way;
+/// only the tables inside the target database were ever at risk.
 #[tokio::test]
 async fn test_rls_policies() -> Result<(), Box<dyn std::error::Error>> {
     let (Ok(admin_url), Ok(app_url)) = (std::env::var("TEST_ADMIN_URL"), std::env::var("TEST_APP_URL")) else {
@@ -16,15 +46,20 @@ async fn test_rls_policies() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     };
 
+    // Recreate the dedicated test database via the `postgres` maintenance
+    // database on the same server, then point both pools at it instead of
+    // whatever database was named in the given URLs.
+    let root_url = with_database(&admin_url, "postgres");
+    let root_pool = PgPool::connect(&root_url).await?;
+    sqlx::query(&format!("DROP DATABASE IF EXISTS {TEST_DB_NAME}")).execute(&root_pool).await?;
+    sqlx::query(&format!("CREATE DATABASE {TEST_DB_NAME}")).execute(&root_pool).await?;
+    root_pool.close().await;
+
+    let admin_url = with_database(&admin_url, TEST_DB_NAME);
+    let app_url = with_database(&app_url, TEST_DB_NAME);
+
     let admin_pool = PgPool::connect(&admin_url).await?;
     sqlx::migrate!("../migrations").run(&admin_pool).await?;
-
-    // Clean slate for this run.
-    sqlx::query(
-        "TRUNCATE users, departments, documents, chunks, chunk_embeddings, department_adapters, adapters, embedding_models CASCADE",
-    )
-    .execute(&admin_pool)
-    .await?;
 
     // Departments: HR and Engineering.
     let hr_id: Uuid = sqlx::query_scalar("INSERT INTO departments (name, slug) VALUES ('HR', 'hr') RETURNING id")

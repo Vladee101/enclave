@@ -58,14 +58,18 @@ pub async fn cmd_create_user(
 
     let mut tx = state.admin_pool.begin().await.map_err(|e| e.to_string())?;
 
-    // The very first profile created on a fresh install becomes the admin
-    // (CLAUDE.md task 11's bootstrap flow); everyone after that is a
-    // regular user unless promoted by an existing admin.
-    let existing_users: i64 = sqlx::query_scalar("SELECT count(*) FROM users")
+    // Bootstrap: whoever creates a profile while no admin exists yet becomes
+    // the admin (CLAUDE.md task 11). Deliberately "no admin exists" rather
+    // than "the users table is empty" — the latter only ever fires on a
+    // truly fresh database and permanently never fires again once any user
+    // row exists (which is exactly what happened here: `is_admin` was added
+    // by a later migration onto a users table that already had rows, so
+    // nobody could ever become admin under the empty-table check).
+    let existing_admins: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE is_admin = true")
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
-    let is_admin = existing_users == 0;
+    let is_admin = existing_admins == 0;
 
     let user = sqlx::query_as::<_, UserInfo>(
         "INSERT INTO users (username, email, password_hash, is_admin) VALUES ($1, $2, $3, $4) RETURNING id, username, is_admin",
