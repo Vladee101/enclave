@@ -16,7 +16,12 @@ export default defineConfig(async () => ({
   server: {
     port: 1420,
     strictPort: true,
-    host: host || false,
+    // Explicit IPv4 loopback, not `false` (Vite's "localhost"): on this
+    // machine Node resolves "localhost" to ::1 first, so Vite only bound to
+    // the IPv6 loopback and Tauri's frontend-ready check (which hits
+    // 127.0.0.1) never connected — `tauri dev` hung forever on "Waiting for
+    // your frontend dev server to start...".
+    host: host || "127.0.0.1",
     hmr: host
       ? {
           protocol: "ws",
