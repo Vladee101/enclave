@@ -1,26 +1,221 @@
-# Architecture Decision Records
+# Enclave
 
-This directory records the significant architecture decisions for the corporate
-RAG + LoRA desktop application, in [MADR](https://adr.github.io/madr/)-style
-format. One file per decision, numbered sequentially. Records are immutable once
-accepted — a decision that changes is *superseded* by a new ADR rather than
-edited in place, so the reasoning trail stays intact.
+Корпоративный AI-ассистент, который целиком работает внутри контура: документы,
+эмбеддинги, модель и каждый запрос остаются на машине пользователя или в его
+локальной сети. Отвечает по документам организации (RAG) голосом, подходящим
+департаменту (LoRA-адаптеры на департамент), и гарантирует, что сотрудник
+одного департамента **физически не может** достать чужие документы — изоляция
+держится в базе данных, а не в коде приложения.
 
-Each record states the context, the decision, the alternatives that were
-weighed and rejected, and the consequences (including the costs we accepted).
+Проектная документация — [docs/adr](docs/adr/README.md), одиннадцать принятых
+Architecture Decision Records. Код следует этим записям, а не наоборот:
+инварианты, которые нельзя нарушать, перечислены в [CLAUDE.md](CLAUDE.md), и у
+каждого есть ссылка на ADR с обоснованием.
 
-## Log
+## Быстрый старт
 
-| #    | Title                                                        | Status   |
-|------|--------------------------------------------------------------|----------|
-| 0001 | Record architecture decisions                                | Accepted |
-| 0002 | On-prem, data-sovereign desktop application                  | Accepted |
-| 0003 | Bundle llama-server as a Tauri sidecar                        | Accepted |
-| 0004 | Compose RAG with per-department LoRA adapters                | Accepted |
-| 0005 | PostgreSQL + pgvector as the single datastore                | Accepted |
-| 0006 | Hybrid retrieval with Reciprocal Rank Fusion                 | Accepted |
-| 0007 | Separate embeddings table with a model registry              | Accepted |
-| 0008 | Department-scoped Row-Level Security                          | Accepted |
-| 0009 | Denormalize department_id onto chunks and chunk_embeddings   | Accepted |
-| 0010 | Asynchronous document ingestion                              | Accepted |
-| 0011 | Defer removal of dormant memberships-based RLS policies      | Accepted |
+Нужны Docker, Rust 1.91+, Node 20+ и pnpm.
+
+```bash
+docker run -d --name enclave-db -p 5433:5432 \
+  -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=enclave \
+  pgvector/pgvector:pg16
+
+export ADMIN_DATABASE_URL="postgres://postgres:postgres@localhost:5433/enclave"
+export APP_DATABASE_URL="postgres://enclave_app:change_me_in_production@localhost:5433/enclave"
+export INGEST_DATABASE_URL="postgres://ingest_worker:change_me_in_production@localhost:5433/enclave"
+
+cd enclave && pnpm install
+pnpm tauri dev
+```
+
+Миграции (`enclave/migrations/001-007`) применяются автоматически при каждом
+старте через `sqlx::migrate!` под `ADMIN_DATABASE_URL`; они же создают роли
+`enclave_app` (запросы под RLS) и `ingest_worker` (BYPASSRLS, только воркер
+загрузки). Первый созданный профиль становится администратором.
+
+Три переменные окружения — это три роли, а не три способа записать одну и ту же
+строку подключения. Подменять `APP_DATABASE_URL` на суперпользователя нельзя:
+RLS при этом молча выключается (ADR-0008).
+
+Инференс — отдельный шаг, он требует GPU-сборки llama.cpp и весов модели:
+
+```bash
+cd enclave && powershell -File .\scripts\fetch-sidecar.ps1
+# затем положить веса: models/base.gguf (чат, ~7B Q4) и models/embed.gguf (эмбеддинги, 768)
+```
+
+Без этого приложение поднимается и работает, но генерация и приём документов
+отваливаются с внятной ошибкой «sidecar unavailable» — это заложенный путь
+деградации, а не поломка. Пути к весам пока передаются серверу относительными
+(`models/base.gguf`), то есть разрешаются от рабочего каталога процесса; в коде
+это помечено как временное решение — брать их следует из каталога данных
+приложения.
+
+## Структура
+
+```
+docs/adr/              одиннадцать ADR — источник истины по «почему»
+docs/HANDOFF.md        состояние работ: что сделано, что открыто, следующий шаг
+CLAUDE.md              бриф для агента: что строить и какие инварианты нельзя нарушать
+db/schema.sql          исходный референсный проект схемы; не применяется нигде
+
+enclave/                                  само приложение
+  migrations/*.sql       единственный источник истины по схеме: pgvector, HNSW + GIN,
+                         RLS-политики, роли app_user / enclave_app / ingest_worker
+  src-tauri/src/
+    lib.rs               старт: три пула, миграции, sidecar, фоновый воркер
+    db/rls.rs            set_config('app.current_user_id', …, true) — транзакционно
+    retrieval/mod.rs     гибридный поиск: плотная ветка ANN + лексическая FTS
+    retrieval/rrf.rs     слияние рангов по RRF, k = 60 (ADR-0006)
+    ingest/mod.rs        нарезка на фрагменты, эмбеддинги, запись chunks + векторов
+    ingest/jobs.rs       воркер: claim через FOR UPDATE SKIP LOCKED, реапер сирот
+    llm/mod.rs           два sidecar'а llama-server: чат (8080) и эмбеддинги (8081)
+    llm/adapters.rs      LoRA пользователя → id, выданные сервером (инвариант №5)
+    commands/            тонкие обёртки Tauri: auth, documents, query, admin
+  src/pages/             Login / Chat (стриминг + цитаты) / Documents / Admin
+  src-tauri/tests/       rls_validation — доказательство изоляции департаментов
+  scripts/               fetch-sidecar.ps1 — разовая загрузка бинарника llama.cpp
+```
+
+## Изоляция департаментов
+
+Ядро проекта. Изоляцию обеспечивает PostgreSQL, а не приложение (ADR-0008):
+каждая таблица в разрезе департамента несёт `department_id`, политики опираются
+на транзакционную переменную `app.current_user_id`, RLS включён в режиме
+`FORCE`, а приложение подключается ролью без прав суперпользователя и без
+`BYPASSRLS`.
+
+```rust
+let mut tx = pool.begin().await?;
+set_current_user(&mut tx, args.user_id).await?;   // set_config(…, true) — живёт до конца транзакции
+let chunks = retrieval::retrieve(&mut tx, &embedding, &args.query, top_k).await?;
+let lora   = adapters_for_user(&mut tx, llm, args.user_id).await?;
+tx.commit().await?;
+```
+
+Три свойства, ради которых написано именно так:
+
+- **закрыто по умолчанию**: переменная сессии не выставлена — политика не нашла
+  ни одной строки, а не пропустила всё;
+- **фильтры в SQL не являются границей безопасности**: явные условия по
+  `department_id` в поисковых запросах нужны для скоупа и скорости ANN,
+  единственная гарантия изоляции — политики RLS, и тест существует ровно для
+  того, чтобы эту разницу удерживать;
+- **переменная транзакционная**: при работе через пул `set_config(…, true)`
+  откатывается в конце транзакции, поэтому личность одного запроса не может
+  протечь в следующий, которому достанется то же соединение.
+
+Тест `enclave/src-tauri/tests/rls_validation.rs` заводит двух пользователей в
+разных департаментах и проверяет, что каждый видит только своё. Работает он в
+одноразовой базе `enclave_rls_test` (drop + create в начале каждого прогона), а
+не в рабочей: в прошлый раз его фикстуры навсегда осели в dev-базе.
+
+```bash
+cd enclave/src-tauri
+export TEST_ADMIN_URL="postgres://postgres:postgres@localhost:5433/enclave"
+export TEST_APP_URL="postgres://enclave_app:change_me_in_production@localhost:5433/enclave"
+cargo test --test rls_validation
+```
+
+Без обеих переменных тест молча пропускается, поэтому в CI их наличие надо
+проверять отдельно — иначе зелёный прогон ничего не доказывает. Последний
+прогон: `test result: ok. 1 passed` на PostgreSQL 16 + pgvector.
+
+Тот же результат руками, без сборки Rust, — видно, что политика закрыта по
+умолчанию, а не фильтрует по запросу:
+
+```
+docs без app.current_user_id      0
+docs под владельцем документов    5
+docs под чужим user_id            0
+```
+
+## Поиск
+
+Плотная ветка (косинусный ANN pgvector по `chunk_embeddings`) и лексическая
+(полнотекстовый `tsvector` по `chunks.content_tsv`) выполняются по отдельности,
+затем их ранги сливаются Reciprocal Rank Fusion в ядре на Rust: `1 / (k + rank)`,
+k = 60. RRF работает по рангам, поэтому косинусное расстояние и полнотекстовый
+ранг не нужно приводить к общей шкале — её у них нет (ADR-0006).
+
+Каждая ветка берёт `2 × top_k` кандидатов, слияние отдаёт `top_k`. Ответ
+возвращается вместе с `sources`, и интерфейс рисует их нумерованными цитатами:
+пользователь видит, на чём основан ответ.
+
+## Приём документов
+
+Загрузка возвращает управление сразу и ставит задачу в `ingestion_jobs`
+(ADR-0010). Конвейер:
+
+```
+upload ─► sha-256 ─► блоб {app_data}/blobs/{file_hash} ─► строка documents ─► задача
+воркер ─► claim (FOR UPDATE SKIP LOCKED) ─► извлечение ─► нарезка ─► эмбеддинги
+       ─► chunks + chunk_embeddings
+```
+
+Блоб пишется до вставки в базу, чтобы воркер никогда не увидел строку документа,
+за которой ещё нет байтов на диске. Хранилище контентно-адресуемое: путь — это и
+есть sha-256 содержимого, поэтому повторная загрузка того же файла не занимает
+места второй раз.
+
+Воркер — единственный компонент, который подключается ролью `ingest_worker`
+(BYPASSRLS): он пишет фрагменты, когда никакой пользовательской сессии ещё нет,
+и потому сам отвечает за проставление правильного `department_id` из
+родительского документа (ADR-0009). При старте он возвращает в `queued` задачи,
+застрявшие в `running` от упавшего прошлого процесса.
+
+Ни одна транзакция базы не держится открытой на время HTTP-вызова к модели или
+эмбеддеру — ни здесь, ни в поиске. Это инвариант, а не оптимизация: пул
+соединений маленький, а вызов модели длинный.
+
+**Известное ограничение.** Извлечение текста сегодня — это
+`String::from_utf8_lossy` над байтами блоба независимо от `mime_type`, то есть
+осмысленный результат получается только для `.txt` и `.md`. Разбор PDF и DOCX —
+будущая работа, помечена в коде. Счётчик токенов — эвристика «символы / 4», тоже
+помечена.
+
+## Инференс и LoRA
+
+Поднимаются два процесса `llama-server`, а не один (ADR-0003): на 8080 —
+резидентная чат-модель с предзагруженными LoRA-адаптерами
+(`--lora-init-without-apply`), на 8081 — отдельная маленькая модель эмбеддингов
+с `--embedding`. Разделять пришлось из-за размерности: `chunk_embeddings.embedding`
+это `vector(768)` (ADR-0007), а скрытая размерность чат-модели совсем другая, и
+переиспользование её под `/embeddings` дало бы векторы неверного размера.
+
+Эмбеддер при старте регистрирует себя строкой в `embedding_models` и гасит
+остальные активные: активная модель всегда ровно одна, потому что именно её
+выбирает воркер загрузки.
+
+Адаптеры выбираются на каждый запрос по департаментам пользователя, а в payload
+уходит **целочисленный id, выданный самим сервером**, — он читается из
+`GET /lora-adapters` и кэшируется как path → id. Раньше id выдумывался через
+`ROW_NUMBER()` по строкам `department_adapters`, что ломается, как только один
+файл адаптера назначен нескольким департаментам. Если сервер нужный путь не
+загрузил, адаптер пропускается с предупреждением, а не подставляется наугад.
+
+## Статус
+
+| Этап | Содержание | Статус |
+| --- | --- | --- |
+| 1 | Каркас Tauri 2 + React + Rust, три пула, автоприменение миграций | готово |
+| 2 | Схема: pgvector, HNSW + GIN, RLS-политики, роли (миграции 001-007) | готово |
+| 3 | Изоляция департаментов и тест `rls_validation` на одноразовой БД | готово |
+| 4 | Вход по PIN (argon2), локальные профили, права администратора | готово |
+| 5 | Приём документов: блоб-хранилище, задачи, воркер, опрос статуса | готово, извлечение текста только для `.txt` / `.md` |
+| 6 | Гибридный поиск + RRF, цитаты в интерфейсе, стриминг ответа | код готов, вживую не проверен — нет модели |
+| 7 | Sidecar'ы llama-server: чат + эмбеддинги, LoRA по департаментам | код готов, бинарник — 27-байтовая заглушка, веса не скачаны |
+| 8 | Поставка PostgreSQL + pgvector вместе с приложением | не решено, нужен ADR — самая рискованная часть упаковки |
+
+**Как это читать.** Всё, что касается базы, изоляции и конвейера загрузки,
+написано и проверяемо на месте. Всё, что касается инференса, написано, но ни
+разу не выполнялось на настоящей модели: в `src-tauri/binaries/` лежит
+27-байтовый плейсхолдер вместо `llama-server`, поэтому сегодня приложение
+поднимается, принимает документы и штатно падает на шаге эмбеддингов с
+«sidecar unavailable». Это нижняя граница, а не результат системы.
+
+Три решения ещё не записаны в ADR: граница доверия воркера загрузки,
+контентно-адресуемое хранилище блобов и способ поставки PostgreSQL — pgvector
+компилируемое расширение, и это самая тяжёлая часть упаковки десктопного
+приложения.

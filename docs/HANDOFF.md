@@ -7,21 +7,26 @@ current state so a new chat can continue without re-deriving anything.
 
 The app **builds and runs**. The full shell works: create profile, login/logout,
 document upload (with sha-256 dedup), and the async ingestion pipeline running
-end to end. Inference is **not** wired yet — the llama-server sidecar is a
-placeholder, so ingestion jobs fail gracefully with "sidecar unavailable." The
-active task is **Plan A: install the real llama-server** and get embeddings +
-generation working.
+end to end. Inference is **not** running yet — `src-tauri/binaries/llama-server…exe`
+is still a 27-byte placeholder, so ingestion jobs fail gracefully with "sidecar
+unavailable." The *wiring* is done, including the second, separate embedding
+sidecar on port 8081 (commit b6960f6), so the remaining work is Plan A: put the
+real binary and the two GGUF models in place and confirm they run.
 
 ## Stack & layout
 
 - Tauri 2 + React + Vite + TypeScript, Rust core, PostgreSQL 16 + pgvector,
   bundled llama-server sidecar (currently a stub).
-- **Real project directory: `~/OneDrive/Desktop/enclave-anti/enclave`** (the
-  NESTED one). Run all commands from there.
-- ⚠️ There is a stale `~/OneDrive/Desktop/enclave` folder and also the parent
-  `enclave-anti/` — both are NOT the project. Repeatedly landing one directory
-  too high has caused "file not found" confusion. Always confirm with `pwd`;
-  you want it to end in `enclave-anti/enclave`.
+- **Real project directory: `C:\Users\vlade\Desktop\enclave-anti\enclave`**
+  (the NESTED one). Run all commands from there.
+- ⚠️ The project used to live under `~/OneDrive/Desktop/…`; a stale copy may
+  still be there, and so is the parent `enclave-anti/` — neither is the
+  project. Always confirm with `pwd`; you want it to end in
+  `enclave-anti/enclave`.
+- ⚠️ Stale `target/` artifacts can still carry the old OneDrive path baked in
+  and break the build with `failed to read plugin permissions: … \OneDrive\ …
+  (os error 3)`. Fix: `cargo clean -p tauri` (≈195 MB, rebuilds that crate),
+  not a full `cargo clean`.
 
 ## Infrastructure / how to run
 
@@ -31,7 +36,7 @@ generation working.
   PostGIS container).
 - Database `enclave`. Schema is applied by `sqlx::migrate!("../migrations")`
   against `ADMIN_DATABASE_URL` on every app startup (`db/mod.rs`), i.e. from
-  `enclave/migrations/*.sql`, currently 001-005. **`db/schema.sql` (and its
+  `enclave/migrations/*.sql`, currently 001-007. **`db/schema.sql` (and its
   copy at `enclave/db/schema.sql`) is NOT applied anywhere and is not the
   live schema** — it was the originally-provided reference design (different
   table/column names throughout: `memberships`+`roles`, `password_hash`,
@@ -163,10 +168,10 @@ Still open (deferred, not blocking Plan A):
 7. **Swallowed frontend errors** — upload failures go to the browser console, not
    the UI. Cosmetic; worth surfacing later.
 8. **`.env` file** not set up (see env vars above — now three vars to remember).
-9. **Not committed to git.** This is the root cause behind issues 1-5 above:
+9. ~~**Not committed to git.**~~ — **fixed**: the tree is under git and pushed
+   to `Vladee101/enclave`. This was the root cause behind issues 1-5 above:
    schema drift and stale doc claims went unnoticed because nothing was ever
-   diffed or reviewed. Strongly recommend `git init` + an initial commit
-   before making further changes.
+   diffed or reviewed.
 
 ## NEXT: Plan A — install real llama-server
 
@@ -194,12 +199,15 @@ with some layers spilling to RAM. Qwen 2.5 7B Q4 matches what the code assumes.
   on the sidecar and caches path→id so `llm/adapters.rs` can resolve the
   *real* sidecar id per request instead of guessing one.
 
-**⚠️ CRITICAL GAP for ingestion:** the spawn has **no `--embedding` flag**, so the
-server won't serve `/v1/embeddings`. Ingestion needs embeddings, so even after the
-binary + base model are in and generation works, **ingestion will still fail until
-embedding support is added** (either `--embedding` + a pooling flag on this
-server, or a second small embedding model/server). Solve this right after the
-server boots.
+**~~CRITICAL GAP for ingestion~~ — resolved (commit b6960f6):** the chat spawn
+still has no `--embedding` flag, deliberately. A *second* llama-server is
+spawned on port 8081 with `--embedding` and its own small model
+(`models/embed.gguf`), and it registers itself in `embedding_models` as the one
+active model. Two processes, not one, because `chunk_embeddings.embedding` is a
+fixed `vector(768)` (ADR-0007) and the chat model's hidden dimension is not 768.
+The embedding sidecar is best-effort: if it fails to start, chat still works and
+only ingestion fails, with a clear error. So Plan A now needs **two** GGUFs:
+`models/base.gguf` (chat, ~7B Q4) and `models/embed.gguf` (768-dim embeddings).
 
 **Recommended approach:** test `llama-server.exe` **standalone from the command
 line first** (with the model, by hand) before touching the Tauri wiring — so any

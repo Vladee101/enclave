@@ -6,7 +6,7 @@
 ## What this file is
 
 A build brief for the coding agent. **The source of truth for *why* is
-`docs/adr/`** — ten accepted Architecture Decision Records. This file says *what
+`docs/adr/`** — eleven accepted Architecture Decision Records. This file says *what
 to build, in what order, and which invariants must never be broken.* When a
 decision here seems arbitrary, the matching ADR explains it. Do not contradict
 an ADR; if reality forces a change, write a new ADR that supersedes the old one
@@ -39,7 +39,7 @@ department's content — enforced in the database, not the app (ADR-0008).
 | File                  | Destination                          | Notes |
 |-----------------------|--------------------------------------|-------|
 | `schema.sql`          | `db/schema.sql` (or `migrations/`)   | Tables, pgvector/tsvector indexes, RLS helpers + policies, roles, seed. |
-| `docs/adr/*`          | `docs/adr/`                          | Ten ADRs + index. Read before changing anything structural. |
+| `docs/adr/*`          | `docs/adr/`                          | Eleven ADRs + index. Read before changing anything structural. |
 | `retrieval.rs`        | `src-tauri/src/retrieval.rs`         | Hybrid search + RRF fusion + LoRA-aware generation + provenance logging. |
 | `ingest.rs`           | `src-tauri/src/ingest.rs`            | Background ingestion worker (claims jobs, extract → chunk → embed → write). |
 | `rls_isolation.rs`    | `src-tauri/tests/rls_isolation.rs`   | Integration test proving cross-department isolation. |
@@ -136,11 +136,11 @@ implementation.
 
 ## Open decisions (write these ADRs)
 
-- **0011 — Ingestion worker trust boundary.** Why ingestion runs as a BYPASSRLS
+- **0012 — Ingestion worker trust boundary.** Why ingestion runs as a BYPASSRLS
   role and what that obligates (department_id stamping). Extends ADR-0008.
-- **0012 — Content-addressed blob storage.** The `{blob_root}/{file_hash}` store
+- **0013 — Content-addressed blob storage.** The `{blob_root}/{file_hash}` store
   and the dedup it enables.
-- **0013 — PostgreSQL distribution.** Resolve the packaging question above.
+- **0014 — PostgreSQL distribution.** Resolve the packaging question above.
 - (Also note, not necessarily an ADR) the `token_count` chars/4 heuristic and
   the no-backoff retry path in `ingest.rs` are deliberate simplifications, both
   commented in-line; revisit if they bite.
