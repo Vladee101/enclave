@@ -120,7 +120,11 @@ pub async fn cmd_upload_document(
             .await
             .map_err(|e| e.to_string())?;
 
-            if status != "failed" {
+            // Requeue when either side says it failed: documents stranded in
+            // 'pending' behind a failed job exist in databases written by
+            // older builds, whose sidecar-unavailable path failed only the job.
+            let job_failed = latest_job.as_ref().is_some_and(|j| j.status == "failed");
+            if status != "failed" && !job_failed {
                 if let Some(job) = latest_job {
                     // Nothing changed, so nothing to audit.
                     tx.commit().await.map_err(|e| e.to_string())?;

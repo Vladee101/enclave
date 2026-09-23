@@ -8,7 +8,7 @@ use crate::{
     audit::{self, event},
     db::rls::set_current_user,
     session::Session,
-    llm::{adapters::adapters_for_user, CompletionRequest, LlmClient},
+    llm::{adapters::adapters_for_user, CompletionRequest, EmbedKind, LlmClient},
     retrieval,
 };
 
@@ -49,7 +49,7 @@ async fn prepare(
 ) -> Result<(String, Vec<crate::llm::LoraEntry>, Vec<retrieval::RetrievedChunk>), String> {
     let top_k = args.top_k.unwrap_or(5);
 
-    let query_embedding = llm.embed(&args.query).await.map_err(|e| e.to_string())?;
+    let query_embedding = llm.embed(&args.query, EmbedKind::Query).await.map_err(|e| e.to_string())?;
 
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
     set_current_user(&mut tx, user_id).await.map_err(|e| e.to_string())?;
@@ -86,13 +86,17 @@ async fn prepare(
         .collect::<Vec<_>>()
         .join("\n\n");
 
-    let prompt = format!(
-        "You are a helpful assistant. Answer the question using only the provided context.\n\
-         If the context does not contain enough information, say so.\n\n\
-         Context:\n{context}\n\n\
-         Question: {}\n\nAnswer:",
-        args.query
-    );
+    // Document text goes in the user turn as quoted material, never in the
+    // system turn: an instruction planted in a document stays data.
+    let system = "You answer questions about the organization's documents. \
+                  Use only the sources given in the user's message and cite them as [Source N]. \
+                  If the sources do not contain the answer, say so. \
+                  Answer once, concisely, in the language of the question.";
+    let user = format!("Sources:\n\n{context}\n\nQuestion: {}", args.query);
+
+    // Transaction already committed above — this HTTP call holds no
+    // connection (CLAUDE.md invariant #4).
+    let prompt = llm.apply_template(system, &user).await.map_err(|e| e.to_string())?;
 
     Ok((prompt, lora, chunks))
 }

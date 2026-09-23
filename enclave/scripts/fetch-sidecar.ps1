@@ -1,110 +1,80 @@
-# Enclave - llama-server sidecar fetcher
-# Downloads the correct llama.cpp release binary for the current platform
-# and places it at the expected Tauri externalBin path.
+# Enclave - llama-server fetcher
+# Downloads a llama.cpp Windows release and unpacks ALL of it (exe + DLLs)
+# into src-tauri/binaries/llama/, where the app runs llama-server in place.
 #
 # Usage:
-#   powershell -File .\scripts\fetch-sidecar.ps1
+#   powershell -File .\scripts\fetch-sidecar.ps1                  # newest build, CUDA 12.4
+#   powershell -File .\scripts\fetch-sidecar.ps1 -Build b11124    # pin a build
+#   powershell -File .\scripts\fetch-sidecar.ps1 -Cuda 13.4       # newer CUDA (driver must support it)
 #
-# ADR-0003: The app is self-contained; this script is the one-time setup step.
+# ADR-0003: the app is self-contained; this script is the one-time setup step.
+#
+# Why the whole archive: current builds ship a ~9 KB llama-server.exe launcher;
+# the server is llama-server-impl.dll, and the ggml backends (ggml-cuda.dll,
+# ggml-cpu-*.dll) are discovered next to the exe. Copying only the exe - what
+# this script used to do - gives a server that starts and does nothing.
+#
+# Why not "latest": the release GitHub marks latest (e.g. v0.4.1) carries no
+# binaries; builds are published as bNNNNN pre-releases.
+#
+# Why CUDA 12.4 by default: it runs on any driver that supports CUDA 12.4+,
+# while the 13.x build needs a driver at least that new (check the "CUDA
+# Version" / "CUDA UMD Version" line of nvidia-smi).
 
 param(
-    [string]$Version = "latest"
+    [string]$Build = "",
+    [string]$Cuda  = "12.4"
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+$ProgressPreference    = "SilentlyContinue"   # Invoke-WebRequest is ~10x slower with the progress bar
 
-$RepoOwner = "ggerganov"
-$RepoName  = "llama.cpp"
-$OutDir    = Join-Path $PSScriptRoot "..\src-tauri\binaries"
+$Repo   = "ggml-org/llama.cpp"
+$OutDir = Join-Path $PSScriptRoot "..\src-tauri\binaries\llama"
 
-if ($Version -eq "latest") {
-    Write-Host "Fetching latest llama.cpp release tag..."
-    $rel = Invoke-RestMethod "https://api.github.com/repos/$RepoOwner/$RepoName/releases/latest" -UseBasicParsing
-    $Version = $rel.tag_name
-    Write-Host "  Latest version: $Version"
+$arch = [System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture
+if ($arch -ne "X64") {
+    Write-Error "Only x64 is scripted so far (got $arch)."
 }
 
-$arch    = [System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture
-$is64    = $arch -eq "X64"
-$isArm64 = $arch -eq "Arm64"
+$mainPattern   = "llama-*-bin-win-cuda-$Cuda-x64.zip"
+$cudartPattern = "cudart-llama-bin-win-cuda-$Cuda-x64.zip"
 
-if (-not ($is64 -or $isArm64)) {
-    Write-Error "Unsupported architecture: $arch"
-}
-
-$assetPattern = if ($isArm64) {
-    "llama-*-bin-win-arm64.zip"
+if ($Build) {
+    $rel = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/tags/$Build" -UseBasicParsing
 } else {
-    "llama-*-bin-win-cuda-*-x64.zip"
+    Write-Host "Looking for the newest build with a Windows CUDA $Cuda asset..."
+    $releases = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases?per_page=20" -UseBasicParsing
+    $rel = $releases | Where-Object { $_.assets | Where-Object { $_.name -like $mainPattern } } | Select-Object -First 1
+    if (-not $rel) { Write-Error "No recent release has an asset matching $mainPattern." }
+}
+Write-Host "Build: $($rel.tag_name)"
+
+$main   = $rel.assets | Where-Object { $_.name -like $mainPattern }   | Select-Object -First 1
+$cudart = $rel.assets | Where-Object { $_.name -like $cudartPattern } | Select-Object -First 1
+if (-not $main)   { Write-Error "$($rel.tag_name) has no asset matching $mainPattern." }
+if (-not $cudart) { Write-Error "$($rel.tag_name) has no asset matching $cudartPattern - without the CUDA runtime DLLs the server exits silently." }
+
+if (Test-Path $OutDir) { Remove-Item $OutDir -Recurse -Force }
+New-Item -ItemType Directory -Path $OutDir | Out-Null
+
+foreach ($asset in @($main, $cudart)) {
+    Write-Host "Downloading $($asset.name) ($([math]::Round($asset.size / 1MB)) MB)..."
+    $zip = Join-Path $env:TEMP $asset.name
+    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip -UseBasicParsing
+    $tmp = Join-Path $env:TEMP "enclave-llama-extract"
+    if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
+    Expand-Archive -Path $zip -DestinationPath $tmp
+    # Flatten: exe and DLLs must share one directory.
+    Get-ChildItem $tmp -Recurse -File | Copy-Item -Destination $OutDir -Force
+    Remove-Item $zip -Force
+    Remove-Item $tmp -Recurse -Force
 }
 
-$assetPatternCpu = "llama-*-bin-win-noavx-x64.zip"
+$exe = Join-Path $OutDir "llama-server.exe"
+if (-not (Test-Path $exe)) { Write-Error "llama-server.exe not found after unpacking." }
+Set-Content -Path (Join-Path $OutDir "BUILD.txt") -Value "$($rel.tag_name) cuda-$Cuda" -Encoding utf8
 
-$rel     = Invoke-RestMethod "https://api.github.com/repos/$RepoOwner/$RepoName/releases/tags/$Version" -UseBasicParsing
-$assets  = $rel.assets
-
-$asset = $assets | Where-Object { $_.name -like $assetPattern } | Select-Object -First 1
-if (-not $asset) {
-    Write-Warning "CUDA asset not found, falling back to CPU binary."
-    $asset = $assets | Where-Object { $_.name -like $assetPatternCpu } | Select-Object -First 1
-}
-if (-not $asset) {
-    Write-Error "No suitable llama.cpp Windows binary found for $Version."
-}
-
-Write-Host "Downloading: $($asset.name)"
-$tmpZip = Join-Path $env:TEMP "llama-sidecar.zip"
-Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $tmpZip -UseBasicParsing
-
-$tmpDir = Join-Path $env:TEMP "llama-sidecar-extract"
-if (Test-Path $tmpDir) { Remove-Item $tmpDir -Recurse -Force }
-Expand-Archive -Path $tmpZip -DestinationPath $tmpDir
-
-$serverBin = Get-ChildItem $tmpDir -Recurse -Filter "llama-server.exe" | Select-Object -First 1
-if (-not $serverBin) {
-    Write-Error "llama-server.exe not found in archive."
-}
-
-$triple = "x86_64-pc-windows-msvc"
-if ($isArm64) { $triple = "aarch64-pc-windows-msvc" }
-
-if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir | Out-Null }
-$dest = Join-Path $OutDir "llama-server-$triple.exe"
-
-Copy-Item $serverBin.FullName -Destination $dest -Force
-Write-Host "Placed sidecar at: $dest"
-
-Remove-Item $tmpZip -Force
-Remove-Item $tmpDir -Recurse -Force
-
-# CUDA builds need the matching CUDA runtime DLLs alongside the exe, or it
-# launches and silently does nothing (no error, no listening port). Not
-# needed for the ARM64/CPU (noavx) fallback builds.
-if (-not $isArm64 -and $asset.name -like "*-cuda-*") {
-    $cudartPattern = "cudart-llama-bin-win-cuda-*-x64.zip"
-    $cudartAsset = $assets | Where-Object { $_.name -like $cudartPattern } | Select-Object -First 1
-
-    if ($cudartAsset) {
-        Write-Host "Downloading CUDA runtime: $($cudartAsset.name)"
-        $cudaZip = Join-Path $env:TEMP "llama-cudart.zip"
-        Invoke-WebRequest -Uri $cudartAsset.browser_download_url -OutFile $cudaZip -UseBasicParsing
-
-        $cudaDir = Join-Path $env:TEMP "llama-cudart-extract"
-        if (Test-Path $cudaDir) { Remove-Item $cudaDir -Recurse -Force }
-        Expand-Archive -Path $cudaZip -DestinationPath $cudaDir
-
-        $dlls = Get-ChildItem $cudaDir -Recurse -Filter "*.dll"
-        foreach ($dll in $dlls) {
-            Copy-Item $dll.FullName -Destination $OutDir -Force
-        }
-        Write-Host "Placed $($dlls.Count) CUDA runtime DLL(s) in: $OutDir"
-
-        Remove-Item $cudaZip -Force
-        Remove-Item $cudaDir -Recurse -Force
-    } else {
-        Write-Warning "No CUDA runtime asset found for $Version. The CUDA build of llama-server.exe will launch and silently exit without these DLLs — download 'cudart-llama-bin-win-cuda-*-x64.zip' from the same release manually and extract its DLLs into $OutDir."
-    }
-}
-
-Write-Host "Done. You can now run the build/check."
+Write-Host "Unpacked $((Get-ChildItem $OutDir -File).Count) files into $OutDir"
+& $exe --version

@@ -4,11 +4,15 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager};
-use tauri_plugin_shell::ShellExt;
+use tauri_plugin_shell::{
+    ShellExt,
+    process::{CommandChild, CommandEvent},
+};
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 pub mod adapters;
 
@@ -38,11 +42,98 @@ fn model_path(app: &AppHandle, file_name: &str) -> Result<String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
+/// Directory holding `llama-server.exe` *together with* its DLLs.
+///
+/// Current llama.cpp builds ship a 9 KB launcher exe; the server itself is
+/// `llama-server-impl.dll`, and the ggml backends (`ggml-cuda.dll`,
+/// `ggml-cpu-*.dll`) are discovered next to the executable. Tauri's
+/// `externalBin` copies only the exe into `target/`, which then starts and
+/// finds nothing — so the exe is run in place, from this directory.
+///
+/// Resolution: `ENCLAVE_LLAMA_DIR`, then `{resource_dir}/llama` (installed
+/// app; bundling it is part of the open packaging decision, ADR-0014), then
+/// `src-tauri/binaries/llama` in debug builds, where `fetch-sidecar.ps1`
+/// unpacks the release.
+fn llama_server_exe(app: &AppHandle) -> Result<PathBuf> {
+    let exe_name = if cfg!(windows) { "llama-server.exe" } else { "llama-server" };
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = std::env::var_os("ENCLAVE_LLAMA_DIR") {
+        candidates.push(PathBuf::from(dir));
+    }
+    if let Ok(dir) = app.path().resource_dir() {
+        candidates.push(dir.join("llama"));
+    }
+    if cfg!(debug_assertions) {
+        candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries").join("llama"));
+    }
+    candidates
+        .iter()
+        .map(|dir| dir.join(exe_name))
+        .find(|exe| exe.is_file())
+        .with_context(|| {
+            format!(
+                "{exe_name} not found in {:?} — run scripts/fetch-sidecar.ps1 or set ENCLAVE_LLAMA_DIR",
+                candidates
+            )
+        })
+}
+
+/// Start one llama-server and keep draining its output into the log.
+///
+/// The drain is not optional: an unread stdout/stderr pipe fills up and the
+/// server blocks on its next log line. Lines go to the `llama` tracing
+/// target at debug level (`RUST_LOG=llama=debug` to see them); an exit is
+/// logged as a warning since neither server is expected to stop on its own.
+fn spawn_llama_server(app: &AppHandle, name: &'static str, args: &[String]) -> Result<CommandChild> {
+    let exe = llama_server_exe(app)?;
+    let dir = exe.parent().map(PathBuf::from).unwrap_or_default();
+    let (mut rx, child) = app
+        .shell()
+        .command(exe.to_string_lossy().into_owned())
+        .current_dir(dir)
+        .args(args)
+        .spawn()
+        .with_context(|| format!("Failed to spawn llama-server ({name}) from {}", exe.display()))?;
+
+    tauri::async_runtime::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            match event {
+                CommandEvent::Stdout(line) | CommandEvent::Stderr(line) => {
+                    debug!(target: "llama", "[{name}] {}", String::from_utf8_lossy(&line).trim_end());
+                }
+                CommandEvent::Terminated(status) => {
+                    warn!("llama-server ({name}) exited: code {:?}", status.code);
+                }
+                _ => {}
+            }
+        }
+    });
+    Ok(child)
+}
+
+/// Which side of retrieval a text is on. nomic-embed-text is trained with
+/// task prefixes and retrieves noticeably worse without them; the prefix is
+/// part of the embedding input only, never of the stored chunk text.
+#[derive(Clone, Copy, Debug)]
+pub enum EmbedKind {
+    Query,
+    Document,
+}
+
+impl EmbedKind {
+    fn prefix(self) -> &'static str {
+        match self {
+            EmbedKind::Query    => "search_query: ",
+            EmbedKind::Document => "search_document: ",
+        }
+    }
+}
+
 /// Shared HTTP client for the llama-server sidecar(s).
 /// Managed as Tauri state after `LlmClient::spawn()`.
 ///
 /// Two separate llama-server processes run, not one: `base_url` (port 8080)
-/// serves the resident chat/completion model (Qwen 2.5 7B) plus LoRA
+/// serves the resident chat/completion model (Qwen 2.5 3B) plus LoRA
 /// adapters, and `embed_base_url` (port 8081, `Option` because it's fine for
 /// chat to work without it) serves a *separate* small embedding model. They
 /// must be separate because `chunk_embeddings.embedding` is a fixed
@@ -60,6 +151,10 @@ pub struct LlmClient {
     pub base_url: String,
     pub embed_base_url: Option<String>,
     adapter_index: Arc<RwLock<HashMap<String, u32>>>,
+    /// Both server processes, killed by `shutdown()` on app exit — Windows
+    /// does not take child processes down with their parent, and a leftover
+    /// server keeps its VRAM and its port.
+    children: Arc<Mutex<Vec<CommandChild>>>,
 }
 
 impl LlmClient {
@@ -94,9 +189,7 @@ impl LlmClient {
         .await
         .context("Failed to load active adapter paths")?;
 
-        // Tauri sidecar path is declared in tauri.conf.json under bundle.externalBin.
-        // The binary name must match the pattern: binaries/llama-server-<target-triple>
-        info!("Spawning llama-server sidecar with {} adapter(s)…", adapter_paths.len());
+        info!("Spawning llama-server (chat) with {} adapter(s)…", adapter_paths.len());
         let mut args: Vec<String> = vec![
             "--port".into(), "8080".into(),
             "--lora-init-without-apply".into(),
@@ -104,6 +197,13 @@ impl LlmClient {
             // llama.cpp clips to what actually fits, so this is safe on any
             // GPU (falls back toward CPU if none/small).
             "--n-gpu-layers".into(), "999".into(),
+            // Explicit, or llama-server sizes the KV cache to fill free VRAM
+            // (measured: 59k tokens over 4 slots for a 3B model — beyond its
+            // 32k training context, and leaving no room for the embedding
+            // server). One desktop user = one slot; 8k covers a 5-chunk
+            // prompt plus 768 generated tokens many times over.
+            "--ctx-size".into(), "8192".into(),
+            "--parallel".into(), "1".into(),
             "--model".into(), model_path(app, "base.gguf")?,
         ];
         for path in &adapter_paths {
@@ -111,18 +211,13 @@ impl LlmClient {
             args.push(path.clone());
         }
 
-        let shell = app.shell();
-        let (_rx, _child) = shell
-            .sidecar("llama-server")
-            .context("llama-server sidecar not found — did you run fetch-sidecar.ps1?")?
-            .args(args)
-            .spawn()
-            .context("Failed to spawn llama-server")?;
+        let children = Arc::new(Mutex::new(Vec::new()));
+        children.lock().unwrap_or_else(|e| e.into_inner()).push(spawn_llama_server(app, "chat", &args)?);
 
         wait_for_health(&http, &base_url, 120).await.context("llama-server (chat) did not become ready")?;
         info!("llama-server (chat) ready at {base_url}");
 
-        let embed_base_url = match Self::spawn_embedding_sidecar(app, &http, pool).await {
+        let embed_base_url = match Self::spawn_embedding_sidecar(app, &http, pool, &children).await {
             Ok(url) => Some(url),
             Err(e) => {
                 warn!(
@@ -133,7 +228,13 @@ impl LlmClient {
             }
         };
 
-        let client = Self { http, base_url, embed_base_url, adapter_index: Arc::new(RwLock::new(HashMap::new())) };
+        let client = Self {
+            http,
+            base_url,
+            embed_base_url,
+            adapter_index: Arc::new(RwLock::new(HashMap::new())),
+            children,
+        };
         if let Err(e) = client.refresh_adapter_index().await {
             warn!("Could not read adapter index from sidecar: {e:#}");
         }
@@ -144,24 +245,30 @@ impl LlmClient {
     /// embedding model on a different port, and register it in
     /// `embedding_models` (ADR-0007) so `ingest/mod.rs`'s "active model"
     /// lookup finds it. Returns the embedding server's base URL on success.
-    async fn spawn_embedding_sidecar(app: &AppHandle, http: &Client, pool: &PgPool) -> Result<String> {
+    async fn spawn_embedding_sidecar(
+        app:      &AppHandle,
+        http:     &Client,
+        pool:     &PgPool,
+        children: &Mutex<Vec<CommandChild>>,
+    ) -> Result<String> {
         let base_url = "http://127.0.0.1:8081".to_string();
         let model = model_path(app, "embed.gguf")?;
 
-        let shell = app.shell();
-        let (_rx, _child) = shell
-            .sidecar("llama-server")
-            .context("llama-server sidecar not found — did you run fetch-sidecar.ps1?")?
-            .args([
-                "--port", "8081",
-                "--embedding",
-                "--n-gpu-layers", "999",
-                // Place a small embedding GGUF (e.g. nomic-embed-text-v1.5,
-                // ~80-150MB quantized) here — separate from the chat model.
-                "--model", &model,
-            ])
-            .spawn()
-            .context("Failed to spawn embedding llama-server")?;
+        let args: Vec<String> = [
+            "--port", "8081",
+            "--embedding",
+            "--n-gpu-layers", "999",
+            // nomic-embed-text was trained on 2048-token inputs; chunks
+            // are 512 characters, far below that.
+            "--ctx-size", "2048",
+            "--parallel", "1",
+            // A small embedding GGUF (nomic-embed-text-v1.5, ~270 MB) —
+            // separate from the chat model, see the struct doc.
+            "--model", &model,
+        ]
+        .map(String::from)
+        .to_vec();
+        children.lock().unwrap_or_else(|e| e.into_inner()).push(spawn_llama_server(app, "embed", &args)?);
 
         wait_for_health(http, &base_url, 60).await.context("embedding llama-server did not become ready")?;
         info!("llama-server (embedding) ready at {base_url}");
@@ -297,32 +404,88 @@ impl LlmClient {
         Ok(full)
     }
 
-    /// POST /embeddings on the *embedding* sidecar (never the chat one —
+    /// POST /v1/embeddings on the *embedding* sidecar (never the chat one —
     /// see the struct doc comment on why they're separate processes).
-    pub async fn embed(&self, content: &str) -> Result<Vec<f32>> {
+    ///
+    /// The OpenAI-compatible endpoint, not the native `/embeddings`: the
+    /// native one's shape has changed across llama.cpp releases (current
+    /// builds answer `[{"index":0,"embedding":[[…]]}]`, which the old
+    /// `{"embedding":[…]}` parsing here rejected), while `/v1/embeddings`
+    /// keeps the `{"data":[{"embedding":[…]}]}` contract.
+    pub async fn embed(&self, content: &str, kind: EmbedKind) -> Result<Vec<f32>> {
         let embed_base_url = self
             .embed_base_url
             .as_deref()
             .context("Embedding model not available — the embedding llama-server sidecar isn't running")?;
 
         #[derive(Serialize)]
-        struct EmbedReq<'a> {
-            content: &'a str,
+        struct EmbedReq {
+            input: String,
         }
         #[derive(Deserialize)]
         struct EmbedResp {
+            data: Vec<EmbedData>,
+        }
+        #[derive(Deserialize)]
+        struct EmbedData {
             embedding: Vec<f32>,
         }
         let resp: EmbedResp = self
             .http
-            .post(format!("{embed_base_url}/embeddings"))
-            .json(&EmbedReq { content })
+            .post(format!("{embed_base_url}/v1/embeddings"))
+            .json(&EmbedReq { input: format!("{}{content}", kind.prefix()) })
             .send()
             .await?
             .error_for_status()?
             .json()
             .await?;
-        Ok(resp.embedding)
+        resp.data
+            .into_iter()
+            .next()
+            .map(|d| d.embedding)
+            .context("embedding server returned no data")
+    }
+
+    /// Wrap a system + user message in the chat template stored in the
+    /// model's own GGUF (POST /apply-template), for use as a /completion
+    /// prompt.
+    ///
+    /// Without it an instruct model sees raw text, doesn't know where its
+    /// turn ends, and keeps going: measured on Qwen 2.5 3B, the answer
+    /// came back followed by a restatement of itself and a stray code
+    /// fence. /completion is kept (rather than /v1/chat/completions)
+    /// because its `lora` field and SSE frame shape are what the rest of
+    /// this client is built on.
+    pub async fn apply_template(&self, system: &str, user: &str) -> Result<String> {
+        #[derive(Deserialize)]
+        struct Resp {
+            prompt: String,
+        }
+        let resp: Resp = self
+            .http
+            .post(format!("{}/apply-template", self.base_url))
+            .json(&serde_json::json!({
+                "messages": [
+                    { "role": "system", "content": system },
+                    { "role": "user",   "content": user },
+                ]
+            }))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(resp.prompt)
+    }
+
+    /// Kill both llama-server processes. Called on app exit.
+    pub fn shutdown(&self) {
+        let mut children = self.children.lock().unwrap_or_else(|e| e.into_inner());
+        for child in children.drain(..) {
+            if let Err(e) = child.kill() {
+                warn!("Failed to stop llama-server: {e}");
+            }
+        }
     }
 }
 

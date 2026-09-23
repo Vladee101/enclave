@@ -84,8 +84,19 @@ pub fn run() {
             commands::admin::cmd_list_adapters,
             commands::admin::cmd_add_adapter,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // Windows keeps child processes alive after the parent exits; a
+            // leftover llama-server would hold its VRAM and port 8080/8081.
+            if let tauri::RunEvent::Exit = event {
+                if let Some(llm) = app.try_state::<Option<llm::LlmClient>>() {
+                    if let Some(llm) = llm.inner() {
+                        llm.shutdown();
+                    }
+                }
+            }
+        });
 }
 
 /// Async init: connect both pools, run migrations, start LLM sidecar.

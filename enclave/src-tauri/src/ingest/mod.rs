@@ -96,7 +96,7 @@ pub async fn ingest_document(
     // transaction writes everything — still all-or-nothing per document.
     let mut embeddings = Vec::with_capacity(chunk_count);
     for content in &chunks {
-        let embedding = llm.embed(content).await?;
+        let embedding = llm.embed(content, crate::llm::EmbedKind::Document).await?;
         check_dimension(&embedding, model_dimension)?;
         embeddings.push(embedding);
     }

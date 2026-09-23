@@ -111,6 +111,12 @@ async fn tick(pool: &PgPool, app: &AppHandle, blob_root: &std::path::Path) -> an
         .bind(msg)
         .execute(pool)
         .await?;
+        // The document fails with its job, same as the error path below —
+        // otherwise it sits in 'pending' forever with nothing queued.
+        sqlx::query("UPDATE documents SET status = 'failed', updated_at = now() WHERE id = $1")
+            .bind(document_id)
+            .execute(pool)
+            .await?;
         return Ok(true);
     };
     let result = crate::ingest::ingest_document(pool, llm, blob_root, document_id).await;

@@ -61,8 +61,20 @@ pub async fn retrieve(
     .await?;
 
     // ── Lexical leg (tsvector FTS) ────────────────────────────────────────
+    // OR over the question's stemmed words, not plainto_tsquery: that ANDs
+    // every word, and a natural-language question ("which port does the
+    // signaling server run on…") matched zero chunks on live data — the leg
+    // was silently dead. With OR, ts_rank_cd ranks chunks matching more of
+    // the words higher. A question of only stopwords yields an empty query,
+    // which matches nothing.
     let lex_rows = sqlx::query(
         r#"
+        WITH q AS (
+            SELECT array_to_string(
+                       array(SELECT quote_literal(l)
+                             FROM unnest(tsvector_to_array(to_tsvector('english', $1))) l),
+                       ' | ')::tsquery AS tsq
+        )
         SELECT
             c.id        AS chunk_id,
             c.document_id,
@@ -70,9 +82,10 @@ pub async fn retrieve(
             c.content
         FROM chunks    c
         JOIN documents d ON d.id = c.document_id
-        WHERE c.content_tsv @@ plainto_tsquery('english', $1)
+        CROSS JOIN q
+        WHERE c.content_tsv @@ q.tsq
           AND d.status = 'ready'
-        ORDER BY ts_rank_cd(c.content_tsv, plainto_tsquery('english', $1)) DESC
+        ORDER BY ts_rank_cd(c.content_tsv, q.tsq) DESC
         LIMIT $2
         "#
     )
