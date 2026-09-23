@@ -26,6 +26,19 @@ pub fn split_into_chunks(text: &str, chunk_size: usize, overlap: usize) -> Vec<S
     chunks
 }
 
+/// Invariant #6: the embedder's output must match the active
+/// `embedding_models.dimension` (and `vector(768)`). Checked before any
+/// write so a mismatch fails the job with a clear message.
+fn check_dimension(embedding: &[f32], expected: i32) -> Result<()> {
+    anyhow::ensure!(
+        embedding.len() == expected as usize,
+        "Embedding dimension mismatch: got {}, expected {}",
+        embedding.len(),
+        expected
+    );
+    Ok(())
+}
+
 /// Ingest a single document: split → embed → insert chunks + embeddings.
 ///
 /// Called by the job runner.  `user_id` must be set on the connection
@@ -76,10 +89,22 @@ pub async fn ingest_document(
     let model_id: Uuid = model_row.try_get("id")?;
     let model_dimension: i32 = model_row.try_get("dimension")?;
 
-    // ── Insert chunks + embeddings in a transaction ────────────────────────
+    // ── Embed every chunk first, with no transaction open ─────────────────
+    // CLAUDE.md invariant #4: never hold a DB transaction across an
+    // LLM/embedding HTTP call. Embeddings for a whole document live in
+    // memory (~2 300 × 768 f32 ≈ 7 MB for a 1 MB text file), then one short
+    // transaction writes everything — still all-or-nothing per document.
+    let mut embeddings = Vec::with_capacity(chunk_count);
+    for content in &chunks {
+        let embedding = llm.embed(content).await?;
+        check_dimension(&embedding, model_dimension)?;
+        embeddings.push(embedding);
+    }
+
+    // ── Insert chunks + embeddings in one short transaction ───────────────
     let mut tx = pool.begin().await?;
 
-    for (idx, content) in chunks.iter().enumerate() {
+    for (idx, (content, embedding)) in chunks.iter().zip(embeddings).enumerate() {
         // token_count: chars/4 heuristic (deliberate simplification, same
         // spirit as the lossy-UTF-8 text extraction above — revisit if it
         // bites, per CLAUDE.md's own note on this heuristic). NOT NULL on
@@ -101,15 +126,6 @@ pub async fn ingest_document(
         .bind(token_count)
         .fetch_one(&mut *tx)
         .await?;
-
-        // Embed.
-        let embedding = llm.embed(content).await?;
-        anyhow::ensure!(
-            embedding.len() == model_dimension as usize,
-            "Embedding dimension mismatch: got {}, expected {}",
-            embedding.len(),
-            model_dimension
-        );
 
         // Insert embedding.
         sqlx::query(
@@ -135,4 +151,34 @@ pub async fn ingest_document(
 
     tx.commit().await?;
     Ok(chunk_count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_dimension_accepts_match_rejects_mismatch() {
+        assert!(check_dimension(&vec![0.0; 768], 768).is_ok());
+        let err = check_dimension(&vec![0.0; 384], 768).unwrap_err().to_string();
+        assert!(err.contains("got 384, expected 768"), "{err}");
+    }
+
+    #[test]
+    fn split_into_chunks_overlaps_and_covers_text() {
+        let text: String = ('a'..='z').cycle().take(1000).collect();
+        let chunks = split_into_chunks(&text, 512, 64);
+        assert_eq!(chunks.len(), 3); // starts at 0, 448, 896
+        assert_eq!(chunks[0].chars().count(), 512);
+        assert_eq!(&chunks[0][448..], &chunks[1][..64]);
+        assert!(text.ends_with(chunks.last().unwrap().as_str()));
+    }
+
+    #[test]
+    fn split_into_chunks_handles_multibyte_and_empty() {
+        assert!(split_into_chunks("", 512, 64).is_empty());
+        let text = "привет".repeat(200); // 1200 chars, 2 bytes each
+        let chunks = split_into_chunks(&text, 512, 64);
+        assert!(chunks.iter().all(|c| c.chars().count() <= 512));
+    }
 }

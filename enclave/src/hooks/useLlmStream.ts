@@ -37,7 +37,7 @@ export function useLlmStream() {
     setStreaming(false);
   }, []);
 
-  const ask = useCallback(async (userId: string, query: string, topK = 5) => {
+  const ask = useCallback(async (query: string, topK = 5) => {
     cancel();
     setPartial('');
     setSources([]);
@@ -54,7 +54,7 @@ export function useLlmStream() {
 
       const result = await invoke<QueryResult>('cmd_query_stream', {
         requestId,
-        args: { user_id: userId, query, top_k: topK },
+        args: { query, top_k: topK }, // identity comes from the core session
       });
 
       setSources(result.sources);

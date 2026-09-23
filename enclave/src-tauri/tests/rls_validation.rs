@@ -286,6 +286,42 @@ async fn test_rls_policies() -> Result<(), Box<dyn std::error::Error>> {
         tx.rollback().await?;
     }
 
+    // 5b. ingestion_jobs is scoped through its parent document. This is the
+    //     query cmd_get_job_status runs: with the identity set in the same
+    //     transaction Alice sees her HR job and not Bob's; on a bare pool
+    //     query (no set_config — the old cmd_get_job_status bug) she sees
+    //     nothing, which left the frontend poller spinning forever.
+    {
+        let hr_job_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO ingestion_jobs (document_id, status) VALUES ($1, 'succeeded') RETURNING id",
+        )
+        .bind(hr_doc_id)
+        .fetch_one(&admin_pool)
+        .await?;
+        let eng_job_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO ingestion_jobs (document_id, status) VALUES ($1, 'succeeded') RETURNING id",
+        )
+        .bind(eng_doc_id)
+        .fetch_one(&admin_pool)
+        .await?;
+
+        let job_status_sql = "SELECT status FROM ingestion_jobs WHERE id = $1";
+
+        let mut tx = app_pool.begin().await?;
+        sqlx::query("SELECT set_config('app.current_user_id', $1, true)")
+            .bind(alice_id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        let own = sqlx::query(job_status_sql).bind(hr_job_id).fetch_optional(&mut *tx).await?;
+        assert_eq!(own.map(|r| r.get::<String, _>("status")).as_deref(), Some("succeeded"));
+        let other = sqlx::query(job_status_sql).bind(eng_job_id).fetch_optional(&mut *tx).await?;
+        assert!(other.is_none(), "Alice must not see an Engineering ingestion job");
+        tx.rollback().await?;
+
+        let bare = sqlx::query(job_status_sql).bind(hr_job_id).fetch_optional(&app_pool).await?;
+        assert!(bare.is_none(), "ingestion_jobs must fail closed without app.current_user_id");
+    }
+
     // 6. Unset session variable fails closed.
     {
         let mut tx = app_pool.begin().await?;

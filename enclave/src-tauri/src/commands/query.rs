@@ -5,14 +5,15 @@ use uuid::Uuid;
 
 use crate::{
     AppState,
+    audit::{self, event},
     db::rls::set_current_user,
+    session::Session,
     llm::{adapters::adapters_for_user, CompletionRequest, LlmClient},
     retrieval,
 };
 
 #[derive(Deserialize)]
 pub struct QueryArgs {
-    pub user_id: Uuid,
     pub query:   String,
     pub top_k:   Option<usize>,
 }
@@ -41,24 +42,40 @@ pub struct QueryResult {
 /// would fail closed), builds the grounded prompt, and resolves the user's
 /// LoRA adapters (ADR-0004, 0006).
 async fn prepare(
-    pool: &PgPool,
-    llm:  &LlmClient,
-    args: &QueryArgs,
+    pool:    &PgPool,
+    llm:     &LlmClient,
+    user_id: Uuid,
+    args:    &QueryArgs,
 ) -> Result<(String, Vec<crate::llm::LoraEntry>, Vec<retrieval::RetrievedChunk>), String> {
     let top_k = args.top_k.unwrap_or(5);
 
     let query_embedding = llm.embed(&args.query).await.map_err(|e| e.to_string())?;
 
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
-    set_current_user(&mut tx, args.user_id).await.map_err(|e| e.to_string())?;
+    set_current_user(&mut tx, user_id).await.map_err(|e| e.to_string())?;
 
     let chunks = retrieval::retrieve(&mut tx, &query_embedding, &args.query, top_k)
         .await
         .map_err(|e| e.to_string())?;
 
-    let lora = adapters_for_user(&mut tx, llm, args.user_id)
+    let lora = adapters_for_user(&mut tx, llm, user_id)
         .await
         .map_err(|e| e.to_string())?;
+
+    // Audited here, in the retrieval transaction: the record is what this
+    // user was actually shown, and it commits together with the reads.
+    // Identifiers only — the question text stays out of the log (audit.rs).
+    let document_ids: Vec<Uuid> = chunks.iter().map(|c| c.document_id).collect();
+    let chunk_ids: Vec<Uuid> = chunks.iter().map(|c| c.chunk_id).collect();
+    audit::record(
+        &mut tx,
+        Some(user_id),
+        None,
+        event::QUERY,
+        serde_json::json!({ "document_ids": document_ids, "chunk_ids": chunk_ids, "top_k": top_k }),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     tx.commit().await.map_err(|e| e.to_string())?;
 
@@ -92,14 +109,28 @@ fn into_sources(chunks: Vec<retrieval::RetrievedChunk>) -> Vec<SourceRef> {
         .collect()
 }
 
+const SIDECAR_UNAVAILABLE: &str =
+    "llama-server sidecar unavailable; cannot answer queries";
+
+/// `lib.rs` manages `Option<LlmClient>` (None when the sidecar failed to
+/// start — NFR7 graceful degradation). Tauri looks state up by exact type,
+/// so commands must take `State<'_, Option<LlmClient>>` and unwrap here,
+/// the same way `ingest::jobs::tick` does.
+fn require_llm(llm: &Option<LlmClient>) -> Result<&LlmClient, String> {
+    llm.as_ref().ok_or_else(|| SIDECAR_UNAVAILABLE.to_string())
+}
+
 /// Main RAG + LoRA query pipeline (ADR-0004, 0006), non-streaming.
 #[tauri::command]
 pub async fn cmd_query(
-    state: State<'_, AppState>,
-    llm:   State<'_, LlmClient>,
-    args:  QueryArgs,
+    state:   State<'_, AppState>,
+    session: State<'_, Session>,
+    llm:     State<'_, Option<LlmClient>>,
+    args:    QueryArgs,
 ) -> Result<QueryResult, String> {
-    let (prompt, lora, chunks) = prepare(&state.app_pool, &llm, &args).await?;
+    let user_id = session.require()?.id;
+    let llm = require_llm(&llm)?;
+    let (prompt, lora, chunks) = prepare(&state.app_pool, llm, user_id, &args).await?;
 
     let req = CompletionRequest {
         prompt,
@@ -125,11 +156,14 @@ struct StreamToken {
 pub async fn cmd_query_stream(
     app:        AppHandle,
     state:      State<'_, AppState>,
-    llm:        State<'_, LlmClient>,
+    session:    State<'_, Session>,
+    llm:        State<'_, Option<LlmClient>>,
     request_id: String,
     args:       QueryArgs,
 ) -> Result<QueryResult, String> {
-    let (prompt, lora, chunks) = prepare(&state.app_pool, &llm, &args).await?;
+    let user_id = session.require()?.id;
+    let llm = require_llm(&llm)?;
+    let (prompt, lora, chunks) = prepare(&state.app_pool, llm, user_id, &args).await?;
 
     let req = CompletionRequest {
         prompt,
@@ -148,4 +182,15 @@ pub async fn cmd_query_stream(
         .map_err(|e| e.to_string())?;
 
     Ok(QueryResult { answer, sources: into_sources(chunks) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn require_llm_none_is_clear_error() {
+        let Err(err) = require_llm(&None) else { panic!("expected an error") };
+        assert_eq!(err, SIDECAR_UNAVAILABLE);
+    }
 }

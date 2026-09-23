@@ -4,7 +4,12 @@ use sqlx::FromRow;
 use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
-use crate::{AppState, db::rls::set_current_user};
+use crate::{
+    AppState,
+    audit::{self, event},
+    db::rls::set_current_user,
+    session::Session,
+};
 
 #[derive(Serialize, FromRow, Debug)]
 pub struct DocumentInfo {
@@ -33,7 +38,6 @@ pub struct JobStatus {
 /// a generic default since browsers don't always report one.
 #[derive(Deserialize)]
 pub struct UploadArgs {
-    pub user_id:        Uuid,
     pub department_id:  Uuid,
     pub filename:       String,
     pub mime_type:      Option<String>,
@@ -42,10 +46,12 @@ pub struct UploadArgs {
 
 #[tauri::command]
 pub async fn cmd_upload_document(
-    app:   AppHandle,
-    state: State<'_, AppState>,
-    args:  UploadArgs,
+    app:     AppHandle,
+    state:   State<'_, AppState>,
+    session: State<'_, Session>,
+    args:    UploadArgs,
 ) -> Result<JobStatus, String> {
+    let user_id = session.require()?.id;
     let digest = Sha256::digest(&args.file_contents);
     let file_hash: String = digest.iter().map(|b| format!("{b:02x}")).collect();
     let byte_size = args.file_contents.len() as i64;
@@ -61,7 +67,7 @@ pub async fn cmd_upload_document(
         .map_err(|e| e.to_string())?;
 
     let mut tx = state.app_pool.begin().await.map_err(|e| e.to_string())?;
-    set_current_user(&mut tx, args.user_id).await.map_err(|e| e.to_string())?;
+    set_current_user(&mut tx, user_id).await.map_err(|e| e.to_string())?;
 
     // ON CONFLICT rather than a pre-check: two concurrent uploads of the same
     // file must not race each other into the UNIQUE (department_id,
@@ -80,7 +86,7 @@ pub async fn cmd_upload_document(
     .bind(&file_hash)
     .bind(mime_type)
     .bind(byte_size)
-    .bind(args.user_id)
+    .bind(user_id)
     .fetch_optional(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
@@ -116,6 +122,7 @@ pub async fn cmd_upload_document(
 
             if status != "failed" {
                 if let Some(job) = latest_job {
+                    // Nothing changed, so nothing to audit.
                     tx.commit().await.map_err(|e| e.to_string())?;
                     return Ok(job);
                 }
@@ -135,6 +142,16 @@ pub async fn cmd_upload_document(
     )
     .bind(doc_id)
     .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    audit::record(
+        &mut tx,
+        Some(user_id),
+        Some(args.department_id),
+        event::DOCUMENT_UPLOADED,
+        serde_json::json!({ "document_id": doc_id, "job_id": job_id, "file_hash": file_hash, "byte_size": byte_size, "reupload": inserted.is_none() }),
+    )
     .await
     .map_err(|e| e.to_string())?;
 
@@ -160,8 +177,9 @@ pub async fn cmd_upload_document(
 #[tauri::command]
 pub async fn cmd_list_documents(
     state:   State<'_, AppState>,
-    user_id: Uuid,
+    session: State<'_, Session>,
 ) -> Result<Vec<DocumentInfo>, String> {
+    let user_id = session.require()?.id;
     let mut tx = state.app_pool.begin().await.map_err(|e| e.to_string())?;
     set_current_user(&mut tx, user_id).await.map_err(|e| e.to_string())?;
 
@@ -177,12 +195,22 @@ pub async fn cmd_list_documents(
 }
 
 /// Poll ingestion job status (the "202 polling" path from ADR-0010).
+///
+/// `ingestion_jobs` is RLS-scoped through its parent document's department,
+/// so this needs the same transaction + `set_current_user` as
+/// `cmd_list_documents` — without it the policy fails closed, the query
+/// always returns `None`, and the frontend poller never terminates.
 #[tauri::command]
 pub async fn cmd_get_job_status(
-    state:  State<'_, AppState>,
-    job_id: Uuid,
+    state:   State<'_, AppState>,
+    session: State<'_, Session>,
+    job_id:  Uuid,
 ) -> Result<Option<JobStatus>, String> {
-    sqlx::query_as::<_, JobStatus>(
+    let user_id = session.require()?.id;
+    let mut tx = state.app_pool.begin().await.map_err(|e| e.to_string())?;
+    set_current_user(&mut tx, user_id).await.map_err(|e| e.to_string())?;
+
+    let job = sqlx::query_as::<_, JobStatus>(
         r#"
         SELECT id AS job_id, document_id, status, attempts, error AS error_text
         FROM ingestion_jobs
@@ -190,7 +218,10 @@ pub async fn cmd_get_job_status(
         "#,
     )
     .bind(job_id)
-    .fetch_optional(&state.app_pool)
+    .fetch_optional(&mut *tx)
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(job)
 }

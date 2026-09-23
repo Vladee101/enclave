@@ -70,6 +70,8 @@ enclave/                                  само приложение
   src-tauri/src/
     lib.rs               старт: три пула, миграции, sidecar, фоновый воркер
     db/rls.rs            set_config('app.current_user_id', …, true) — транзакционно
+    session.rs           кто вошёл: выставляет только cmd_login, команды берут личность отсюда
+    audit.rs             журнал аудита — запись в той же транзакции, что и действие
     retrieval/mod.rs     гибридный поиск: плотная ветка ANN + лексическая FTS
     retrieval/rrf.rs     слияние рангов по RRF, k = 60 (ADR-0006)
     ingest/mod.rs        нарезка на фрагменты, эмбеддинги, запись chunks + векторов
@@ -91,10 +93,11 @@ enclave/                                  само приложение
 `BYPASSRLS`.
 
 ```rust
+let user_id = session.require()?.id;               // из сессии ядра, не из аргументов команды
 let mut tx = pool.begin().await?;
-set_current_user(&mut tx, args.user_id).await?;   // set_config(…, true) — живёт до конца транзакции
+set_current_user(&mut tx, user_id).await?;        // set_config(…, true) — живёт до конца транзакции
 let chunks = retrieval::retrieve(&mut tx, &embedding, &args.query, top_k).await?;
-let lora   = adapters_for_user(&mut tx, llm, args.user_id).await?;
+let lora   = adapters_for_user(&mut tx, llm, user_id).await?;
 tx.commit().await?;
 ```
 

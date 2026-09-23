@@ -51,8 +51,8 @@ export function DocumentsPage() {
 
   useEffect(() => {
     if (!user) return;
-    invoke<DocInfo[]>('cmd_list_documents', { userId: user.id }).then(setDocs).catch(console.error);
-    invoke<{ id: string; name: string }[]>('cmd_list_my_departments', { userId: user.id }).then(d => {
+    invoke<DocInfo[]>('cmd_list_documents').then(setDocs).catch(console.error);
+    invoke<{ id: string; name: string }[]>('cmd_list_my_departments').then(d => {
       setDepts(d);
       if (d.length > 0) setDeptId(d[0].id);
     }).catch(console.error);
@@ -81,7 +81,6 @@ export function DocumentsPage() {
       const file_contents = Array.from(new Uint8Array(buf));
       const job = await invoke<JobStatus>('cmd_upload_document', {
         args: {
-          user_id:       user.id,
           department_id: deptId,
           filename:      file.name,
           mime_type:     file.type || null,

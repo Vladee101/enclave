@@ -50,7 +50,7 @@ export function ChatPage() {
     setTimeout(scrollBottom, 50);
 
     try {
-      await ask(user.id, q, 5);
+      await ask(q, 5);
     } catch (e) {
       setMessages(prev => prev.map(m => (
         m.id === botId ? { ...m, content: `⚠️ Error: ${String(e)}` } : m
