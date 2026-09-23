@@ -9,6 +9,7 @@ pub mod event {
     pub const LOGOUT:             &str = "logout";
     pub const USER_CREATED:       &str = "user_created";
     pub const DEPARTMENT_CREATED: &str = "department_created";
+    pub const DEPARTMENT_DELETED: &str = "department_deleted";
     pub const MEMBER_ADDED:       &str = "member_added";
     pub const MEMBER_REMOVED:     &str = "member_removed";
     pub const ADAPTER_ASSIGNED:   &str = "adapter_assigned";

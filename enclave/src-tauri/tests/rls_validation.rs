@@ -439,9 +439,141 @@ async fn test_rls_policies() -> Result<(), Box<dyn std::error::Error>> {
         //     (a misfiled document).
         let (_, dept, _) = delete_as(&app_pool, Some(dan_id), eng_doc_id).await?;
         assert_eq!(dept, eng_id);
+
+        // 8. Department deletion with its documents (ADR-0017): admin only,
+        //    never the default department, content purged, tombstones kept.
+        let legal_id: Uuid =
+            sqlx::query_scalar("INSERT INTO departments (name, slug) VALUES ('Legal', 'legal') RETURNING id")
+                .fetch_one(&admin_pool)
+                .await?;
+        sqlx::query("INSERT INTO department_members (user_id, department_id) VALUES ($1, $2)")
+            .bind(carol_id)
+            .bind(legal_id)
+            .execute(&admin_pool)
+            .await?;
+        sqlx::query("INSERT INTO department_adapters (department_id, adapter_id, scale) VALUES ($1, $2, 1.0)")
+            .bind(legal_id)
+            .bind(hr_adapter_id)
+            .execute(&admin_pool)
+            .await?;
+        // Two Legal documents: one with its own bytes, one whose bytes also
+        // back a live HR document — that blob must survive.
+        let mut legal_docs = Vec::new();
+        for (title, hash) in [("contract.md", "hash-legal-only"), ("shared.md", "hash-shared")] {
+            let doc: Uuid = sqlx::query_scalar(
+                "INSERT INTO documents (department_id, title, file_hash, mime_type, byte_size, status, uploaded_by) \
+                 VALUES ($1, $2, $3, 'text/markdown', 10, 'ready', $4) RETURNING id",
+            )
+            .bind(legal_id)
+            .bind(title)
+            .bind(hash)
+            .bind(carol_id)
+            .fetch_one(&admin_pool)
+            .await?;
+            let chunk: Uuid = sqlx::query_scalar(
+                "INSERT INTO chunks (document_id, department_id, chunk_index, content, token_count) \
+                 VALUES ($1, $2, 0, 'legal text', 2) RETURNING id",
+            )
+            .bind(doc)
+            .bind(legal_id)
+            .fetch_one(&admin_pool)
+            .await?;
+            sqlx::query("INSERT INTO chunk_embeddings (chunk_id, embedding_model_id, department_id, embedding) VALUES ($1, $2, $3, $4)")
+                .bind(chunk)
+                .bind(model_id)
+                .bind(legal_id)
+                .bind(vec![0.3_f32; 768])
+                .execute(&admin_pool)
+                .await?;
+            legal_docs.push(doc);
+        }
+        sqlx::query(
+            "INSERT INTO documents (department_id, title, file_hash, mime_type, byte_size, status, uploaded_by) \
+             VALUES ($1, 'shared.md', 'hash-shared', 'text/markdown', 10, 'ready', $2)",
+        )
+        .bind(hr_id)
+        .bind(alice_id)
+        .execute(&admin_pool)
+        .await?;
+
+        // 8a. A member (even one who uploaded everything in it) cannot.
+        let err = delete_department_as(&app_pool, Some(carol_id), legal_id).await.expect_err("carol");
+        assert_eq!(sqlstate(&err).as_deref(), Some(denied), "{err}");
+
+        // 8b. Not even an admin can delete the default department.
+        let general_id: Uuid = sqlx::query_scalar("SELECT id FROM departments WHERE is_default")
+            .fetch_one(&admin_pool)
+            .await?;
+        let err = delete_department_as(&app_pool, Some(dan_id), general_id).await.expect_err("general");
+        assert_eq!(sqlstate(&err).as_deref(), Some("23001"), "{err}");
+
+        // 8c. An admin can; content goes, tombstones stay.
+        let (mut deleted_docs, orphaned) = delete_department_as(&app_pool, Some(dan_id), legal_id).await?;
+        deleted_docs.sort();
+        legal_docs.sort();
+        assert_eq!(deleted_docs, legal_docs);
+        assert_eq!(orphaned, vec!["hash-legal-only".to_string()], "a blob another live document uses must stay");
+
+        let counts: (i64, i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM chunks WHERE department_id = $1), \
+                    (SELECT count(*) FROM chunk_embeddings WHERE department_id = $1), \
+                    (SELECT count(*) FROM documents WHERE department_id = $1 AND deleted_at IS NULL), \
+                    (SELECT count(*) FROM department_members WHERE department_id = $1), \
+                    (SELECT count(*) FROM department_adapters WHERE department_id = $1)",
+        )
+        .bind(legal_id)
+        .fetch_one(&admin_pool)
+        .await?;
+        assert_eq!(counts, (0, 0, 0, 0, 0), "chunks, vectors, live documents, members, adapters");
+        let tombstones: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM documents WHERE department_id = $1 AND deleted_by = $2",
+        )
+        .bind(legal_id)
+        .bind(dan_id)
+        .fetch_one(&admin_pool)
+        .await?;
+        assert_eq!(tombstones, 2, "document tombstones must stay for audit_log");
+        let dept_deleted_by: Option<Uuid> =
+            sqlx::query_scalar("SELECT deleted_by FROM departments WHERE id = $1 AND deleted_at IS NOT NULL")
+                .bind(legal_id)
+                .fetch_one(&admin_pool)
+                .await?;
+        assert_eq!(dept_deleted_by, Some(dan_id));
+
+        // 8d. The name is free again; a second delete finds nothing.
+        sqlx::query("INSERT INTO departments (name, slug) VALUES ('Legal', 'legal-2')")
+            .execute(&admin_pool)
+            .await?;
+        let err = delete_department_as(&app_pool, Some(dan_id), legal_id).await.expect_err("twice");
+        assert_eq!(sqlstate(&err).as_deref(), Some("P0002"), "{err}");
     }
 
     Ok(())
+}
+
+/// Run delete_department() as `user`, like cmd_delete_department does.
+async fn delete_department_as(pool: &PgPool, user: Option<Uuid>, dept: Uuid) -> Result<(Vec<Uuid>, Vec<String>), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    if let Some(user) = user {
+        sqlx::query("SELECT set_config('app.current_user_id', $1, true)")
+            .bind(user.to_string())
+            .execute(&mut *tx)
+            .await?;
+    }
+    match sqlx::query_as("SELECT document_ids, orphaned_blobs FROM delete_department($1)")
+        .bind(dept)
+        .fetch_one(&mut *tx)
+        .await
+    {
+        Ok(row) => {
+            tx.commit().await?;
+            Ok(row)
+        }
+        Err(e) => {
+            let _ = tx.rollback().await;
+            Err(e)
+        }
+    }
 }
 
 /// Run delete_document() as `user` in its own transaction, like

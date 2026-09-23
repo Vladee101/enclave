@@ -255,16 +255,28 @@ pub async fn cmd_delete_document(
     tx.commit().await.map_err(|e| e.to_string())?;
 
     if !blob_still_used {
-        let blob = app.path().app_data_dir().map_err(|e| e.to_string())?.join("blobs").join(&file_hash);
-        match tokio::fs::remove_file(&blob).await {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            // The document is already deleted; a leftover file is an orphan
-            // (ADR-0013's GC), not a reason to report the deletion as failed.
-            Err(e) => tracing::warn!("Document {document_id} deleted, but its blob stays: {e}"),
-        }
+        remove_blob(&app, &file_hash).await;
     }
     Ok(())
+}
+
+/// Remove `{app_data}/blobs/{file_hash}` after a deletion has committed,
+/// once the database has said no live document uses those bytes any more.
+/// Best effort: the deletion already happened, and a leftover file is an
+/// orphan for ADR-0013's GC, not a reason to report the deletion as failed.
+pub(crate) async fn remove_blob(app: &AppHandle, file_hash: &str) {
+    let blob = match app.path().app_data_dir() {
+        Ok(dir) => dir.join("blobs").join(file_hash),
+        Err(e) => {
+            tracing::warn!("Blob {file_hash} stays: no app data dir: {e}");
+            return;
+        }
+    };
+    match tokio::fs::remove_file(&blob).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!("Blob {file_hash} stays: {e}"),
+    }
 }
 
 /// Poll ingestion job status (the "202 polling" path from ADR-0010).

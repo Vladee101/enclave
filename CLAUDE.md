@@ -6,7 +6,7 @@
 ## What this file is
 
 A build brief for the coding agent. **The source of truth for *why* is
-`docs/adr/`** — thirteen accepted Architecture Decision Records (0001–0011, 0015, 0016). This file says *what
+`docs/adr/`** — fourteen accepted Architecture Decision Records (0001–0011, 0015–0017). This file says *what
 to build, in what order, and which invariants must never be broken.* When a
 decision here seems arbitrary, the matching ADR explains it. Do not contradict
 an ADR; if reality forces a change, write a new ADR that supersedes the old one
@@ -67,8 +67,10 @@ department's content — enforced in the database, not the app (ADR-0008).
    isolation. The `rls_isolation` test exists to enforce this distinction.
 8. **Two pools, two roles.** `app_pool` (app_user) for all user-facing work;
    `ingest_pool` (ingest_worker) only for the worker.
-9. **Documents are deleted only through `delete_document()`** (ADR-0015):
-   uploader or admin, checked in the database. `app_user` has no DELETE on
+9. **Documents are deleted only through `delete_document()`, departments only
+   through `delete_department()`** (ADR-0015, ADR-0017): a document by its
+   uploader or an admin, a department by an admin and never the default one —
+   checked in the database. `app_user` has no DELETE on
    `documents`, may UPDATE only `status`/`updated_at`, and cannot write
    `chunks`/`chunk_embeddings` at all. Do not grant these back to make a
    feature work — add a SECURITY DEFINER function with its own check.

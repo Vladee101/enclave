@@ -1,12 +1,13 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::FromRow;
-use tauri::State;
+use tauri::{AppHandle, State};
 use uuid::Uuid;
 
 use crate::{
     AppState,
     audit::{self, event},
+    commands::documents::remove_blob,
     db::rls::set_current_user,
     session::Session,
 };
@@ -87,18 +88,89 @@ async fn require_admin(state: &State<'_, AppState>, session: &State<'_, Session>
     }
 }
 
-/// List every department in the org. Admin-only — see `cmd_list_my_departments`
-/// for the RLS-scoped listing ordinary users (e.g. the upload picker) should use.
+/// A department as the Admin page lists it: with the counts the delete
+/// confirmation shows ("Sales — 3 members, 12 documents").
+#[derive(Serialize, FromRow, Debug)]
+pub struct AdminDepartmentInfo {
+    pub id:             Uuid,
+    pub name:           String,
+    pub is_default:     bool,
+    pub member_count:   i64,
+    pub document_count: i64,
+}
+
+/// List every live department in the org. Admin-only — see
+/// `cmd_list_my_departments` for the RLS-scoped listing ordinary users
+/// (e.g. the upload picker) should use.
 #[tauri::command]
 pub async fn cmd_list_departments(
     state:   State<'_, AppState>,
     session: State<'_, Session>,
-) -> Result<Vec<DepartmentInfo>, String> {
+) -> Result<Vec<AdminDepartmentInfo>, String> {
     require_admin(&state, &session).await?;
-    sqlx::query_as::<_, DepartmentInfo>("SELECT id, name, is_default FROM departments ORDER BY is_default DESC, name")
-        .fetch_all(&state.admin_pool)
-        .await
-        .map_err(|e| e.to_string())
+    sqlx::query_as::<_, AdminDepartmentInfo>(
+        r#"
+        SELECT d.id, d.name, d.is_default,
+               (SELECT count(*) FROM department_members m WHERE m.department_id = d.id) AS member_count,
+               (SELECT count(*) FROM documents x WHERE x.department_id = d.id AND x.deleted_at IS NULL) AS document_count
+        FROM departments d
+        WHERE d.deleted_at IS NULL
+        ORDER BY d.is_default DESC, d.name
+        "#,
+    )
+    .fetch_all(&state.admin_pool)
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Delete a department together with its documents (ADR-0017).
+///
+/// Everything is `delete_department()` in the database: the admin check,
+/// refusing the default department, purging every document's chunks and
+/// embeddings, tombstoning documents and the department, dropping
+/// memberships and adapter assignments. Runs on app_pool with the caller's
+/// identity — like document deletion, not on the superuser pool — so the
+/// rule is the database's, not this function's. Audited in the same
+/// transaction; blob files no live document uses are removed after COMMIT.
+#[tauri::command]
+pub async fn cmd_delete_department(
+    app:           AppHandle,
+    state:         State<'_, AppState>,
+    session:       State<'_, Session>,
+    department_id: Uuid,
+) -> Result<(), String> {
+    let user_id = session.require()?.id;
+    let mut tx = state.app_pool.begin().await.map_err(|e| e.to_string())?;
+    set_current_user(&mut tx, user_id).await.map_err(|e| e.to_string())?;
+
+    let (document_ids, orphaned_blobs): (Vec<Uuid>, Vec<String>) =
+        sqlx::query_as("SELECT document_ids, orphaned_blobs FROM delete_department($1)")
+            .bind(department_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| match e.as_database_error().and_then(|d| d.code()) {
+                Some(code) if code == "42501" => "Admin privileges required.".to_string(),
+                Some(code) if code == "23001" => "The default department cannot be deleted.".to_string(),
+                Some(code) if code == "P0002" => "Department not found.".to_string(),
+                _ => e.to_string(),
+            })?;
+
+    audit::record(
+        &mut tx,
+        Some(user_id),
+        Some(department_id),
+        event::DEPARTMENT_DELETED,
+        serde_json::json!({ "document_ids": document_ids, "blobs_removed": orphaned_blobs.len() }),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    tx.commit().await.map_err(|e| e.to_string())?;
+
+    for hash in &orphaned_blobs {
+        remove_blob(&app, hash).await;
+    }
+    Ok(())
 }
 
 /// List only the departments the calling user belongs to (RLS-enforced via
@@ -118,7 +190,9 @@ pub async fn cmd_list_my_departments(
     let mut tx = state.app_pool.begin().await.map_err(|e| e.to_string())?;
     set_current_user(&mut tx, user_id).await.map_err(|e| e.to_string())?;
 
-    let depts = sqlx::query_as::<_, DepartmentInfo>("SELECT id, name, is_default FROM departments ORDER BY is_default DESC, name")
+    let depts = sqlx::query_as::<_, DepartmentInfo>(
+        "SELECT id, name, is_default FROM departments WHERE deleted_at IS NULL ORDER BY is_default DESC, name",
+    )
         .fetch_all(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;

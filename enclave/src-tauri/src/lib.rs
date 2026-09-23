@@ -78,6 +78,7 @@ pub fn run() {
             commands::admin::cmd_list_departments,
             commands::admin::cmd_list_my_departments,
             commands::admin::cmd_create_department,
+            commands::admin::cmd_delete_department,
             commands::admin::cmd_list_memberships,
             commands::admin::cmd_add_member,
             commands::admin::cmd_remove_member,

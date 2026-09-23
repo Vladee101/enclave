@@ -4,8 +4,9 @@ import { useAuth } from '../contexts/AuthContext';
 import { Badge } from '../components/Badge';
 import { Button } from '../components/Button';
 import { FormField } from '../components/FormField';
+import { ErrorText } from '../components/ErrorText';
 
-interface Dept    { id: string; name: string; is_default: boolean; }
+interface Dept    { id: string; name: string; is_default: boolean; member_count: number; document_count: number; }
 interface Adapter { id: string; department_id: string; adapter_path: string; scale: number; is_active: boolean; }
 interface UserRow { id: string; username: string; is_admin: boolean; }
 interface Membership { user_id: string; username: string; department_id: string; department_name: string; }
@@ -33,6 +34,7 @@ export function AdminPage() {
   const [memberForm,  setMemberForm]  = useState({ user_id: '', department_id: '' });
   const [audit,       setAudit]       = useState<AuditEntry[]>([]);
   const [saving, setSaving] = useState(false);
+  const [error,  setError]  = useState<string | null>(null);
 
   async function load() {
     if (!user) return;
@@ -57,6 +59,22 @@ export function AdminPage() {
   }
 
   useEffect(() => { load(); }, [user]);
+
+  async function deleteDept(d: Dept) {
+    const docs = d.document_count === 1 ? '1 document' : `${d.document_count} documents`;
+    const members = d.member_count === 1 ? '1 membership' : `${d.member_count} memberships`;
+    if (!window.confirm(
+      `Delete department "${d.name}" together with its ${docs} and ${members}?\n\n` +
+      'The documents\' text is removed from search immediately. Users stay, in their other departments. This cannot be undone.',
+    )) return;
+    setError(null);
+    try {
+      await invoke('cmd_delete_department', { departmentId: d.id });
+    } catch (e) {
+      setError(String(e));
+    }
+    await load();
+  }
 
   async function createDept(e: React.FormEvent) {
     e.preventDefault();
@@ -119,12 +137,16 @@ export function AdminPage() {
           </div>
         </div>
 
+        {error && <ErrorText>{error}</ErrorText>}
+
         {depts.length > 0 && (
           <table className="admin-table" style={{ marginBottom: 20 }}>
             <thead>
               <tr>
                 <th>Name</th>
-                <th>ID</th>
+                <th>Members</th>
+                <th>Documents</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
@@ -134,7 +156,15 @@ export function AdminPage() {
                     {d.name}
                     {d.is_default && <> <Badge cls="badge-info">default · everyone</Badge></>}
                   </td>
-                  <td className="mono" style={{ color: 'var(--text-muted)', fontSize: 11 }}>{d.id}</td>
+                  <td>{d.member_count}</td>
+                  <td>{d.document_count}</td>
+                  <td style={{ textAlign: 'right' }}>
+                    {!d.is_default && (
+                      <Button variant="ghost" onClick={() => deleteDept(d)} aria-label={`Delete department ${d.name}`}>
+                        Delete
+                      </Button>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>
