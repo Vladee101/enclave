@@ -8,3 +8,4 @@
 
 # llama.cpp release (exe + DLLs, ~1.2 GB) unpacked by scripts/fetch-sidecar.ps1
 /binaries/llama/
+/target-tools/
