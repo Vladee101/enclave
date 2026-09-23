@@ -45,6 +45,7 @@ pub async fn retrieve(
         JOIN chunks    c ON c.id = ce.chunk_id
         JOIN documents d ON d.id = c.document_id
         WHERE d.status = 'ready'
+          AND d.deleted_at IS NULL
           -- Only vectors from the model that embedded the query: cosine
           -- between vectors of two different models is meaningless, and
           -- ADR-0007 keeps old-model rows around during re-embedding.
@@ -85,6 +86,7 @@ pub async fn retrieve(
         CROSS JOIN q
         WHERE c.content_tsv @@ q.tsq
           AND d.status = 'ready'
+          AND d.deleted_at IS NULL
         ORDER BY ts_rank_cd(c.content_tsv, q.tsq) DESC
         LIMIT $2
         "#

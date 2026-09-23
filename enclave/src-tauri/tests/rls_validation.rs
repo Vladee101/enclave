@@ -332,5 +332,132 @@ async fn test_rls_policies() -> Result<(), Box<dyn std::error::Error>> {
         tx.rollback().await?;
     }
 
+    // 7. Document deletion (ADR-0015): uploader or administrator only, and
+    //    only through delete_document(). Last on purpose — it deletes.
+    {
+        // Carol: HR member who did not upload hr_secrets.pdf. Dan: admin,
+        // member of no department.
+        let carol_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (username, email, password_hash) VALUES ('carol', 'carol@local', 'x') RETURNING id",
+        )
+        .fetch_one(&admin_pool)
+        .await?;
+        sqlx::query("INSERT INTO department_members (user_id, department_id) VALUES ($1, $2)")
+            .bind(carol_id)
+            .bind(hr_id)
+            .execute(&admin_pool)
+            .await?;
+        let dan_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (username, email, password_hash, is_admin) VALUES ('dan', 'dan@local', 'x', true) RETURNING id",
+        )
+        .fetch_one(&admin_pool)
+        .await?;
+
+        let denied = "42501"; // insufficient_privilege
+
+        // 7a. Not the uploader, not a member, no identity: all refused with
+        //     the same code — no hint whether the document exists.
+        for (who, user) in [("carol (member, not uploader)", Some(carol_id)), ("bob (not a member)", Some(bob_id)), ("no identity", None)] {
+            let err = delete_as(&app_pool, user, hr_doc_id).await.expect_err(who);
+            assert_eq!(sqlstate(&err).as_deref(), Some(denied), "{who}: {err}");
+        }
+
+        // 7b. The direct paths are closed for app_user whatever the policies:
+        //     no DELETE on documents, no UPDATE of deleted_at, no writes to chunks.
+        for (what, sql) in [
+            ("DELETE documents", "DELETE FROM documents WHERE id = $1"),
+            ("UPDATE documents.deleted_at", "UPDATE documents SET deleted_at = now() WHERE id = $1"),
+            ("DELETE chunks", "DELETE FROM chunks WHERE document_id = $1"),
+            ("UPDATE chunks", "UPDATE chunks SET content = '' WHERE document_id = $1"),
+        ] {
+            let mut tx = app_pool.begin().await?;
+            sqlx::query("SELECT set_config('app.current_user_id', $1, true)")
+                .bind(alice_id.to_string())
+                .execute(&mut *tx)
+                .await?;
+            let err = sqlx::query(sql).bind(hr_doc_id).execute(&mut *tx).await.expect_err(what);
+            assert_eq!(sqlstate(&err).as_deref(), Some(denied), "{what}: {err}");
+            tx.rollback().await?;
+        }
+
+        // 7c. The uploader can: content purged, tombstone kept.
+        let (hash, dept, blob_still_used) = delete_as(&app_pool, Some(alice_id), hr_doc_id).await?;
+        assert_eq!((hash.as_str(), dept, blob_still_used), ("hash-hr", hr_id, false));
+        let chunks_left: i64 = sqlx::query_scalar("SELECT count(*) FROM chunks WHERE document_id = $1")
+            .bind(hr_doc_id)
+            .fetch_one(&admin_pool)
+            .await?;
+        let vectors_left: i64 = sqlx::query_scalar("SELECT count(*) FROM chunk_embeddings WHERE chunk_id = $1")
+            .bind(hr_chunk_id)
+            .fetch_one(&admin_pool)
+            .await?;
+        assert_eq!((chunks_left, vectors_left), (0, 0), "deletion must purge chunks and embeddings");
+        let deleted_by: Option<Uuid> = sqlx::query_scalar("SELECT deleted_by FROM documents WHERE id = $1 AND deleted_at IS NOT NULL")
+            .bind(hr_doc_id)
+            .fetch_one(&admin_pool)
+            .await?;
+        assert_eq!(deleted_by, Some(alice_id), "tombstone must record who deleted");
+
+        // Deleting it again: not found, not a second tombstone.
+        let err = delete_as(&app_pool, Some(alice_id), hr_doc_id).await.expect_err("second delete");
+        assert_eq!(sqlstate(&err).as_deref(), Some("P0002"));
+
+        // 7d. The same file can be uploaded again as a new document —
+        //     uniqueness covers live documents only.
+        {
+            let mut tx = app_pool.begin().await?;
+            sqlx::query("SELECT set_config('app.current_user_id', $1, true)")
+                .bind(alice_id.to_string())
+                .execute(&mut *tx)
+                .await?;
+            let new_id: Option<Uuid> = sqlx::query_scalar(
+                "INSERT INTO documents (department_id, title, file_hash, mime_type, byte_size, uploaded_by) \
+                 VALUES ($1, 'hr_secrets.pdf', 'hash-hr', 'application/pdf', 1024, $2) \
+                 ON CONFLICT (department_id, file_hash) WHERE deleted_at IS NULL DO NOTHING RETURNING id",
+            )
+            .bind(hr_id)
+            .bind(alice_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            assert!(new_id.is_some_and(|id| id != hr_doc_id), "re-upload after deletion must create a new document");
+            tx.rollback().await?;
+        }
+
+        // 7e. An administrator can delete in a department they are not in
+        //     (a misfiled document).
+        let (_, dept, _) = delete_as(&app_pool, Some(dan_id), eng_doc_id).await?;
+        assert_eq!(dept, eng_id);
+    }
+
     Ok(())
+}
+
+/// Run delete_document() as `user` in its own transaction, like
+/// cmd_delete_document does; commit on success.
+async fn delete_as(pool: &PgPool, user: Option<Uuid>, doc: Uuid) -> Result<(String, Uuid, bool), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    if let Some(user) = user {
+        sqlx::query("SELECT set_config('app.current_user_id', $1, true)")
+            .bind(user.to_string())
+            .execute(&mut *tx)
+            .await?;
+    }
+    match sqlx::query_as("SELECT file_hash, department_id, blob_still_used FROM delete_document($1)")
+        .bind(doc)
+        .fetch_one(&mut *tx)
+        .await
+    {
+        Ok(row) => {
+            tx.commit().await?;
+            Ok(row)
+        }
+        Err(e) => {
+            let _ = tx.rollback().await;
+            Err(e)
+        }
+    }
+}
+
+fn sqlstate(e: &sqlx::Error) -> Option<String> {
+    e.as_database_error().and_then(|d| d.code()).map(|c| c.into_owned())
 }

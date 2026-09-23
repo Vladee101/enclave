@@ -4,12 +4,15 @@ import { useAuth } from '../contexts/AuthContext';
 import { useJobPoller } from '../hooks/useJobPoller';
 import { Badge } from '../components/Badge';
 import { Spinner } from '../components/Spinner';
+import { Button } from '../components/Button';
+import { ErrorText } from '../components/ErrorText';
 
 interface DocInfo {
   id:            string;
   filename:      string;
   status:        'pending' | 'ready' | 'failed';
   department_id: string;
+  can_delete:    boolean;
 }
 
 interface JobStatus {
@@ -46,6 +49,7 @@ export function DocumentsPage() {
   const [dragOver,    setDragOver] = useState(false);
   const [deptId,      setDeptId]  = useState('');
   const [depts,       setDepts]   = useState<{ id: string; name: string }[]>([]);
+  const [error,       setError]   = useState<string | null>(null);
   const fileInputRef              = useRef<HTMLInputElement>(null);
   const { jobs, track }           = useJobPoller(1500);
 
@@ -97,11 +101,23 @@ export function DocumentsPage() {
             filename: file.name,
             status: 'pending',
             department_id: deptId,
+            can_delete: true, // the uploader may always delete their own
           }, ...prev]);
       setPending(prev => ({ ...prev, [job.document_id]: job.job_id }));
       track(job.job_id);
     } catch (e) {
       console.error('Upload failed:', e);
+    }
+  }
+
+  async function remove(doc: DocInfo) {
+    if (!window.confirm(`Delete "${doc.filename}"? Its text is removed from search immediately; this cannot be undone.`)) return;
+    setError(null);
+    try {
+      await invoke('cmd_delete_document', { documentId: doc.id });
+      setDocs(prev => prev.filter(d => d.id !== doc.id));
+    } catch (e) {
+      setError(String(e));
     }
   }
 
@@ -167,6 +183,8 @@ export function DocumentsPage() {
         </div>
       )}
 
+      {error && <ErrorText>{error}</ErrorText>}
+
       {/* Documents list */}
       <div className="doc-grid">
         {docs.length === 0 && (
@@ -189,6 +207,11 @@ export function DocumentsPage() {
                 {badge.label === 'Ingesting…' && <Spinner size={10} borderWidth={1.5} />}
                 {badge.label}
               </Badge>
+              {doc.can_delete && (
+                <Button variant="ghost" onClick={() => remove(doc)} aria-label={`Delete ${doc.filename}`}>
+                  Delete
+                </Button>
+              )}
             </div>
           );
         })}

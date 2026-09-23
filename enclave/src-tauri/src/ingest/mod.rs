@@ -104,6 +104,18 @@ pub async fn ingest_document(
     // ── Insert chunks + embeddings in one short transaction ───────────────
     let mut tx = pool.begin().await?;
 
+    // The document may have been deleted while its chunks were being
+    // embedded (ADR-0015). Lock its row — delete_document() takes the same
+    // lock — and write nothing if it is gone: purged content must not come
+    // back. A deletion after this commit finds the chunks and purges them.
+    let deleted: Option<bool> = sqlx::query_scalar(
+        "SELECT deleted_at IS NOT NULL FROM documents WHERE id = $1 FOR UPDATE",
+    )
+    .bind(document_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    anyhow::ensure!(deleted == Some(false), "document deleted during ingestion; nothing written");
+
     for (idx, (content, embedding)) in chunks.iter().zip(embeddings).enumerate() {
         // token_count: chars/4 heuristic (deliberate simplification, same
         // spirit as the lossy-UTF-8 text extraction above — revisit if it

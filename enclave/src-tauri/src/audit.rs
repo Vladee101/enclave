@@ -13,6 +13,7 @@ pub mod event {
     pub const MEMBER_REMOVED:     &str = "member_removed";
     pub const ADAPTER_ASSIGNED:   &str = "adapter_assigned";
     pub const DOCUMENT_UPLOADED:  &str = "document_uploaded";
+    pub const DOCUMENT_DELETED:   &str = "document_deleted";
     pub const QUERY:              &str = "query";
 }
 
