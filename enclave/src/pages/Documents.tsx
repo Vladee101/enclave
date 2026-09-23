@@ -42,13 +42,36 @@ function docIcon(filename: string): string {
   return '📁';
 }
 
+interface Dept { id: string; name: string; is_default: boolean; }
+
+/**
+ * Which department to preselect as the upload target, or '' for "ask".
+ * The one rule: never silently pick the shared department — it is the only
+ * direction in which a wrong target exposes a document to everyone. Picking
+ * a narrower department by mistake only hides it from colleagues, which the
+ * uploader notices and fixes.
+ *   - only one department at all → that one (nothing to choose);
+ *   - exactly one besides the shared one → that one (the work department);
+ *   - otherwise → explicit choice.
+ */
+function defaultTarget(depts: Dept[]): string {
+  if (depts.length === 1) return depts[0].id;
+  const specific = depts.filter(d => !d.is_default);
+  return specific.length === 1 ? specific[0].id : '';
+}
+
+/** The shared department is visible to every user — say so wherever it is chosen. */
+function deptLabel(d: Dept): string {
+  return d.is_default ? `${d.name} (visible to everyone)` : d.name;
+}
+
 export function DocumentsPage() {
   const { user } = useAuth();
   const [docs,        setDocs]    = useState<DocInfo[]>([]);
   const [pendingJobs, setPending] = useState<Record<string, string>>({});  // doc_id → job_id
   const [dragOver,    setDragOver] = useState(false);
   const [deptId,      setDeptId]  = useState('');
-  const [depts,       setDepts]   = useState<{ id: string; name: string }[]>([]);
+  const [depts,       setDepts]   = useState<Dept[]>([]);
   const [error,       setError]   = useState<string | null>(null);
   const fileInputRef              = useRef<HTMLInputElement>(null);
   const { jobs, track }           = useJobPoller(1500);
@@ -56,9 +79,9 @@ export function DocumentsPage() {
   useEffect(() => {
     if (!user) return;
     invoke<DocInfo[]>('cmd_list_documents').then(setDocs).catch(console.error);
-    invoke<{ id: string; name: string }[]>('cmd_list_my_departments').then(d => {
+    invoke<Dept[]>('cmd_list_my_departments').then(d => {
       setDepts(d);
-      if (d.length > 0) setDeptId(d[0].id);
+      setDeptId(defaultTarget(d));
     }).catch(console.error);
   }, [user]);
 
@@ -106,7 +129,7 @@ export function DocumentsPage() {
       setPending(prev => ({ ...prev, [job.document_id]: job.job_id }));
       track(job.job_id);
     } catch (e) {
-      console.error('Upload failed:', e);
+      setError(`Upload of "${file.name}" failed: ${e}`);
     }
   }
 
@@ -122,9 +145,16 @@ export function DocumentsPage() {
   }
 
   function handleFiles(files: FileList | null) {
-    if (!files) return;
+    if (!files || files.length === 0) return;
+    if (!deptId) {
+      setError('Choose the department to upload to first.');
+      return;
+    }
+    setError(null);
     Array.from(files).forEach(upload);
   }
+
+  const target = depts.find(d => d.id === deptId);
 
   function resolveStatus(doc: DocInfo): { cls: string; label: string } {
     const jobId = pendingJobs[doc.id];
@@ -137,20 +167,43 @@ export function DocumentsPage() {
 
   return (
     <div>
+      {/* Department selector — only when there is a choice to make; the
+          target is always spelled out in the upload zone below. */}
+      {depts.length > 1 && (
+      <div className="flex items-center gap-3" style={{ marginBottom: 12 }}>
+        <span className="text-sm text-muted">Upload to:</span>
+        <select
+          id="dept-select"
+          aria-label="Upload to department"
+          className="input"
+          style={{ width: 'auto' }}
+          value={deptId}
+          onChange={e => { setDeptId(e.target.value); setError(null); }}
+        >
+          <option value="" disabled>Choose a department…</option>
+          {depts.map(d => (
+            <option key={d.id} value={d.id}>{deptLabel(d)}</option>
+          ))}
+        </select>
+      </div>
+      )}
+
       {/* Upload zone */}
       <div
         className={`drop-zone${dragOver ? ' drag-over' : ''}`}
-        style={{ marginBottom: 24 }}
-        onClick={() => fileInputRef.current?.click()}
+        style={{ marginBottom: 24, opacity: target ? 1 : 0.6 }}
+        onClick={() => (target ? fileInputRef.current?.click() : setError('Choose the department to upload to first.'))}
         onDragOver={e => { e.preventDefault(); setDragOver(true); }}
         onDragLeave={() => setDragOver(false)}
         onDrop={e => { e.preventDefault(); setDragOver(false); handleFiles(e.dataTransfer.files); }}
         role="button"
         tabIndex={0}
-        aria-label="Upload documents"
+        aria-label={target ? `Upload documents to ${target.name}` : 'Choose a department first'}
       >
         <div className="drop-zone-icon">📂</div>
-        <div className="drop-zone-text">Drop documents here or click to browse</div>
+        <div className="drop-zone-text">
+          {target ? <>Drop documents here to upload to <strong>{deptLabel(target)}</strong></> : 'Choose a department above first'}
+        </div>
         <div className="drop-zone-hint">PDF, DOCX, TXT, MD — all stored locally</div>
         <input
           id="file-input"
@@ -160,28 +213,9 @@ export function DocumentsPage() {
           style={{ display: 'none' }}
           multiple
           accept=".pdf,.doc,.docx,.txt,.md,.xls,.xlsx,.ppt,.pptx"
-          onChange={e => handleFiles(e.target.files)}
+          onChange={e => { handleFiles(e.target.files); e.target.value = ''; }}
         />
       </div>
-
-      {/* Department selector */}
-      {depts.length > 0 && (
-        <div className="flex items-center gap-3" style={{ marginBottom: 16 }}>
-          <span className="text-sm text-muted">Upload to:</span>
-          <select
-            id="dept-select"
-            aria-label="Upload to department"
-            className="input"
-            style={{ width: 'auto' }}
-            value={deptId}
-            onChange={e => setDeptId(e.target.value)}
-          >
-            {depts.map(d => (
-              <option key={d.id} value={d.id}>{d.name}</option>
-            ))}
-          </select>
-        </div>
-      )}
 
       {error && <ErrorText>{error}</ErrorText>}
 
@@ -200,7 +234,7 @@ export function DocumentsPage() {
               <div className="doc-meta">
                 <div className="doc-name">{doc.filename}</div>
                 <div className="doc-info">
-                  {depts.find(d => d.id === doc.department_id)?.name ?? 'Unknown dept'}
+                  {(() => { const d = depts.find(d => d.id === doc.department_id); return d ? deptLabel(d) : 'Unknown dept'; })()}
                 </div>
               </div>
               <Badge cls={badge.cls}>

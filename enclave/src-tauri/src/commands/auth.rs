@@ -45,8 +45,8 @@ pub async fn cmd_list_users(state: State<'_, AppState>) -> Result<Vec<UserInfo>,
         .map_err(|e| e.to_string())
 }
 
-/// Create a new local user profile with a PIN, a default department, and an
-/// admin membership — all in a single admin_pool transaction.
+/// Create a new local user profile with a PIN and membership in the shared
+/// default department — all in a single admin_pool transaction.
 #[derive(Deserialize)]
 pub struct CreateUserArgs {
     pub username: String,
@@ -87,14 +87,14 @@ pub async fn cmd_create_user(
     .await
     .map_err(|e| e.to_string())?;
 
-    let dept_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO departments (name, slug) VALUES ($1, $2) RETURNING id",
-    )
-    .bind(format!("{}'s Department", args.username))
-    .bind(format!("{}-dept", args.username.to_lowercase()))
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|e| e.to_string())?;
+    // The shared default department (migrations/010, ADR-0016) — the only
+    // membership a new profile gets. Departments are access grants, and
+    // this command runs from the login screen unauthenticated, so any
+    // other membership comes from an administrator (cmd_add_member).
+    let dept_id: Uuid = sqlx::query_scalar("SELECT id FROM departments WHERE is_default")
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| format!("default department missing: {e}"))?;
 
     sqlx::query(
         "INSERT INTO department_members (user_id, department_id) VALUES ($1, $2)",

@@ -61,6 +61,18 @@ async fn test_rls_policies() -> Result<(), Box<dyn std::error::Error>> {
     let admin_pool = PgPool::connect(&admin_url).await?;
     sqlx::migrate!("../migrations").run(&admin_pool).await?;
 
+    // 0. Migrations leave exactly one shared default department (ADR-0016);
+    //    cmd_create_user relies on it, and the partial unique index forbids a
+    //    second.
+    let defaults: Vec<String> = sqlx::query_scalar("SELECT name FROM departments WHERE is_default")
+        .fetch_all(&admin_pool)
+        .await?;
+    assert_eq!(defaults, vec!["General".to_string()]);
+    let second_default = sqlx::query("INSERT INTO departments (name, slug, is_default) VALUES ('Other', 'other', true)")
+        .execute(&admin_pool)
+        .await;
+    assert!(second_default.is_err(), "a second default department must be rejected");
+
     // Departments: HR and Engineering.
     let hr_id: Uuid = sqlx::query_scalar("INSERT INTO departments (name, slug) VALUES ('HR', 'hr') RETURNING id")
         .fetch_one(&admin_pool)

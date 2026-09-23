@@ -13,8 +13,11 @@ use crate::{
 
 #[derive(Serialize, FromRow, Debug)]
 pub struct DepartmentInfo {
-    pub id:   Uuid,
-    pub name: String,
+    pub id:         Uuid,
+    pub name:       String,
+    /// The shared department every profile joins (ADR-0016). The UI marks
+    /// it, since whatever is uploaded there is visible to everyone.
+    pub is_default: bool,
 }
 
 /// A department's assignment of one adapter (`department_adapters` joined to
@@ -92,7 +95,7 @@ pub async fn cmd_list_departments(
     session: State<'_, Session>,
 ) -> Result<Vec<DepartmentInfo>, String> {
     require_admin(&state, &session).await?;
-    sqlx::query_as::<_, DepartmentInfo>("SELECT id, name FROM departments ORDER BY name")
+    sqlx::query_as::<_, DepartmentInfo>("SELECT id, name, is_default FROM departments ORDER BY is_default DESC, name")
         .fetch_all(&state.admin_pool)
         .await
         .map_err(|e| e.to_string())
@@ -115,7 +118,7 @@ pub async fn cmd_list_my_departments(
     let mut tx = state.app_pool.begin().await.map_err(|e| e.to_string())?;
     set_current_user(&mut tx, user_id).await.map_err(|e| e.to_string())?;
 
-    let depts = sqlx::query_as::<_, DepartmentInfo>("SELECT id, name FROM departments ORDER BY name")
+    let depts = sqlx::query_as::<_, DepartmentInfo>("SELECT id, name, is_default FROM departments ORDER BY is_default DESC, name")
         .fetch_all(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
@@ -140,7 +143,7 @@ pub async fn cmd_create_department(
 
     let mut tx = state.admin_pool.begin().await.map_err(|e| e.to_string())?;
     let dept = sqlx::query_as::<_, DepartmentInfo>(
-        "INSERT INTO departments (name, slug) VALUES ($1, $2) RETURNING id, name",
+        "INSERT INTO departments (name, slug) VALUES ($1, $2) RETURNING id, name, is_default",
     )
     .bind(&args.name)
     .bind(slugify(&args.name))

@@ -5,7 +5,7 @@ import { Badge } from '../components/Badge';
 import { Button } from '../components/Button';
 import { FormField } from '../components/FormField';
 
-interface Dept    { id: string; name: string; }
+interface Dept    { id: string; name: string; is_default: boolean; }
 interface Adapter { id: string; department_id: string; adapter_path: string; scale: number; is_active: boolean; }
 interface UserRow { id: string; username: string; is_admin: boolean; }
 interface Membership { user_id: string; username: string; department_id: string; department_name: string; }
@@ -114,7 +114,7 @@ export function AdminPage() {
           <div>
             <div style={{ fontWeight: 600, fontSize: 15 }}>Departments</div>
             <div className="text-sm text-muted" style={{ marginTop: 2 }}>
-              Each department can have its own documents and LoRA adapter.
+              Each department can have its own documents and LoRA adapter. New profiles join only the default department; add them to others under Members.
             </div>
           </div>
         </div>
@@ -130,7 +130,10 @@ export function AdminPage() {
             <tbody>
               {depts.map(d => (
                 <tr key={d.id}>
-                  <td style={{ fontWeight: 500 }}>{d.name}</td>
+                  <td style={{ fontWeight: 500 }}>
+                    {d.name}
+                    {d.is_default && <> <Badge cls="badge-info">default · everyone</Badge></>}
+                  </td>
                   <td className="mono" style={{ color: 'var(--text-muted)', fontSize: 11 }}>{d.id}</td>
                 </tr>
               ))}
