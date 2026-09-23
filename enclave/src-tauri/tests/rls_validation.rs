@@ -59,6 +59,24 @@ async fn test_rls_policies() -> Result<(), Box<dyn std::error::Error>> {
     let app_url = with_database(&app_url, TEST_DB_NAME);
 
     let admin_pool = PgPool::connect(&admin_url).await?;
+
+    // Reproduce the drift found in real databases before migrating: default
+    // privileges handing app_user write on every new table and EXECUTE on
+    // every new function in `public`. Migration 012 must remove them; on a
+    // clean database section 9's "table created later" check would pass
+    // trivially. (Roles are cluster-wide; on a brand-new cluster app_user
+    // does not exist before 004, and there is no drift to reproduce.)
+    sqlx::query(
+        "DO $$ BEGIN
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_user') THEN
+                ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO app_user;
+                ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO app_user;
+            END IF;
+         END $$",
+    )
+    .execute(&admin_pool)
+    .await?;
+
     sqlx::migrate!("../migrations").run(&admin_pool).await?;
 
     // 0. Migrations leave exactly one shared default department (ADR-0016);
@@ -546,6 +564,61 @@ async fn test_rls_policies() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
         let err = delete_department_as(&app_pool, Some(dan_id), legal_id).await.expect_err("twice");
         assert_eq!(sqlstate(&err).as_deref(), Some("P0002"), "{err}");
+
+        // 9. Least privilege (ADR-0018): app_user writes exactly what the app
+        //    writes on app_pool. `UPDATE users SET is_admin` used to succeed —
+        //    a straight escalation past every admin check above.
+        sqlx::query("CREATE TABLE probe_future_table (id INT)").execute(&admin_pool).await?;
+        for (what, sql) in [
+            ("make self admin", "UPDATE users SET is_admin = true WHERE id = $1"),
+            ("create a user", "INSERT INTO users (username, email, password_hash, is_admin) VALUES ('mallory', 'm@local', 'x', true) RETURNING $1"),
+            ("join a department", "INSERT INTO department_members (user_id, department_id) SELECT $1, id FROM departments WHERE slug = 'engineering'"),
+            ("create a department", "INSERT INTO departments (name, slug) SELECT 'Rogue', 'rogue' WHERE $1 IS NOT NULL"),
+            ("unassign an adapter", "DELETE FROM department_adapters WHERE $1 IS NOT NULL"),
+            ("assign an adapter", "INSERT INTO department_adapters (department_id, adapter_id, scale) SELECT d.id, a.id, 2.0 FROM departments d, adapters a WHERE d.slug = 'hr' AND $1 IS NOT NULL LIMIT 1"),
+            ("register an adapter file", "INSERT INTO adapters (name, file_path, base_model, rank, alpha, file_hash) SELECT 'r', 'r.gguf', 'b', 8, 16, 'r' WHERE $1 IS NOT NULL"),
+            ("register an embedding model", "INSERT INTO embedding_models (name, dimension) SELECT 'rogue', 768 WHERE $1 IS NOT NULL"),
+            ("rewrite a job", "UPDATE ingestion_jobs SET status = 'succeeded' WHERE $1 IS NOT NULL"),
+            ("rewrite the audit log", "UPDATE audit_log SET event_type = 'x' WHERE user_id = $1"),
+            ("erase the audit log", "DELETE FROM audit_log WHERE user_id = $1"),
+            ("write a table created later", "INSERT INTO probe_future_table SELECT 1 WHERE $1 IS NOT NULL"),
+        ] {
+            let mut tx = app_pool.begin().await?;
+            sqlx::query("SELECT set_config('app.current_user_id', $1, true)")
+                .bind(alice_id.to_string())
+                .execute(&mut *tx)
+                .await?;
+            let err = sqlx::query(sql).bind(alice_id).execute(&mut *tx).await.expect_err(what);
+            assert_eq!(sqlstate(&err).as_deref(), Some(denied), "{what}: {err}");
+            tx.rollback().await?;
+        }
+
+        // …while the writes the app does make still work.
+        {
+            let mut tx = app_pool.begin().await?;
+            sqlx::query("SELECT set_config('app.current_user_id', $1, true)")
+                .bind(alice_id.to_string())
+                .execute(&mut *tx)
+                .await?;
+            let doc: Uuid = sqlx::query_scalar(
+                "INSERT INTO documents (department_id, title, file_hash, mime_type, byte_size, uploaded_by) \
+                 VALUES ($1, 'fresh.md', 'hash-fresh', 'text/markdown', 1, $2) RETURNING id",
+            )
+            .bind(hr_id)
+            .bind(alice_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            sqlx::query("UPDATE documents SET status = 'pending', updated_at = now() WHERE id = $1")
+                .bind(doc)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("INSERT INTO ingestion_jobs (document_id) VALUES ($1)").bind(doc).execute(&mut *tx).await?;
+            sqlx::query("INSERT INTO audit_log (user_id, event_type) VALUES ($1, 'probe')")
+                .bind(alice_id)
+                .execute(&mut *tx)
+                .await?;
+            tx.rollback().await?;
+        }
     }
 
     Ok(())

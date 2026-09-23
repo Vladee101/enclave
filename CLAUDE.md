@@ -6,7 +6,7 @@
 ## What this file is
 
 A build brief for the coding agent. **The source of truth for *why* is
-`docs/adr/`** — fourteen accepted Architecture Decision Records (0001–0011, 0015–0017). This file says *what
+`docs/adr/`** — fifteen accepted Architecture Decision Records (0001–0011, 0015–0018). This file says *what
 to build, in what order, and which invariants must never be broken.* When a
 decision here seems arbitrary, the matching ADR explains it. Do not contradict
 an ADR; if reality forces a change, write a new ADR that supersedes the old one
@@ -74,6 +74,12 @@ department's content — enforced in the database, not the app (ADR-0008).
    `documents`, may UPDATE only `status`/`updated_at`, and cannot write
    `chunks`/`chunk_embeddings` at all. Do not grant these back to make a
    feature work — add a SECURITY DEFINER function with its own check.
+10. **`app_user` writes only what the app writes on `app_pool`** (ADR-0018):
+    INSERT on `documents`, `ingestion_jobs`, `audit_log`, and UPDATE of
+    `documents.status`/`updated_at`. Everything else is read-only for it.
+    A new write through `app_pool` needs an explicit GRANT in the migration
+    that introduces it — default privileges no longer hand out writes, and
+    `rls_validation` section 9 fails if a forbidden write comes back.
 
 ## Build tasks (in order)
 
