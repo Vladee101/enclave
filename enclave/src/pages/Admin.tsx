@@ -9,6 +9,14 @@ interface Dept    { id: string; name: string; }
 interface Adapter { id: string; department_id: string; adapter_path: string; scale: number; is_active: boolean; }
 interface UserRow { id: string; username: string; is_admin: boolean; }
 interface Membership { user_id: string; username: string; department_id: string; department_name: string; }
+interface AuditEntry {
+  id: string;
+  created_at: string;
+  username: string | null;
+  department_name: string | null;
+  event_type: string;
+  payload: Record<string, unknown> | null;
+}
 
 export function AdminPage() {
   const { user } = useAuth();
@@ -23,20 +31,23 @@ export function AdminPage() {
   const [users,       setUsers]       = useState<UserRow[]>([]);
   const [memberships, setMemberships] = useState<Membership[]>([]);
   const [memberForm,  setMemberForm]  = useState({ user_id: '', department_id: '' });
+  const [audit,       setAudit]       = useState<AuditEntry[]>([]);
   const [saving, setSaving] = useState(false);
 
   async function load() {
     if (!user) return;
-    const [d, a, u, m] = await Promise.all([
-      invoke<Dept[]>('cmd_list_departments', { requestingUserId: user.id }),
-      invoke<Adapter[]>('cmd_list_adapters', { requestingUserId: user.id }),
+    const [d, a, u, m, log] = await Promise.all([
+      invoke<Dept[]>('cmd_list_departments'),
+      invoke<Adapter[]>('cmd_list_adapters'),
       invoke<UserRow[]>('cmd_list_users'),
-      invoke<Membership[]>('cmd_list_memberships', { requestingUserId: user.id }),
+      invoke<Membership[]>('cmd_list_memberships'),
+      invoke<AuditEntry[]>('cmd_list_audit', { limit: 100 }),
     ]);
     setDepts(d);
     setAdapters(a);
     setUsers(u);
     setMemberships(m);
+    setAudit(log);
     if (d.length > 0 && !adapterForm.department_id) {
       setAdapterForm(prev => ({ ...prev, department_id: d[0].id }));
     }
@@ -52,7 +63,7 @@ export function AdminPage() {
     if (!user) return;
     setSaving(true);
     await invoke('cmd_create_department', {
-      args: { requesting_user_id: user.id, name: newDept },
+      args: { name: newDept },
     }).catch(console.error);
     setNewDept('');
     await load();
@@ -64,7 +75,7 @@ export function AdminPage() {
     if (!user) return;
     setSaving(true);
     await invoke('cmd_add_member', {
-      args: { requesting_user_id: user.id, ...memberForm },
+      args: memberForm,
     }).catch(console.error);
     await load();
     setSaving(false);
@@ -73,7 +84,7 @@ export function AdminPage() {
   async function removeMember(m: Membership) {
     if (!user) return;
     await invoke('cmd_remove_member', {
-      args: { requesting_user_id: user.id, user_id: m.user_id, department_id: m.department_id },
+      args: { user_id: m.user_id, department_id: m.department_id },
     }).catch(console.error);
     await load();
   }
@@ -84,7 +95,6 @@ export function AdminPage() {
     setSaving(true);
     await invoke('cmd_add_adapter', {
       args: {
-        requesting_user_id: user.id,
         department_id: adapterForm.department_id,
         adapter_path:  adapterForm.adapter_path,
         scale:         parseFloat(adapterForm.scale),
@@ -286,6 +296,44 @@ export function AdminPage() {
             </div>
           </FormField>
         </form>
+      </div>
+
+      {/* ── Audit log ── */}
+      <div className="card">
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontWeight: 600, fontSize: 15 }}>Audit log</div>
+          <div className="text-sm text-muted" style={{ marginTop: 2 }}>
+            Last 100 events. Queries are logged by the documents and chunks they cited, not by their text.
+          </div>
+        </div>
+        {audit.length === 0 ? (
+          <div className="text-sm text-muted">No events yet.</div>
+        ) : (
+          <table className="admin-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>User</th>
+                <th>Event</th>
+                <th>Department</th>
+                <th>Details</th>
+              </tr>
+            </thead>
+            <tbody>
+              {audit.map(e => (
+                <tr key={e.id}>
+                  <td style={{ whiteSpace: 'nowrap' }}>{new Date(e.created_at).toLocaleString()}</td>
+                  <td>{e.username ?? '—'}</td>
+                  <td className="mono" style={{ fontSize: 12 }}>{e.event_type}</td>
+                  <td>{e.department_name ?? '—'}</td>
+                  <td className="mono" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                    {e.payload && Object.keys(e.payload).length > 0 ? JSON.stringify(e.payload) : ''}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </div>
     </div>
   );

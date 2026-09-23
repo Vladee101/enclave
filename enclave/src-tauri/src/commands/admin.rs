@@ -4,7 +4,12 @@ use sqlx::FromRow;
 use tauri::State;
 use uuid::Uuid;
 
-use crate::{AppState, db::rls::set_current_user};
+use crate::{
+    AppState,
+    audit::{self, event},
+    db::rls::set_current_user,
+    session::Session,
+};
 
 #[derive(Serialize, FromRow, Debug)]
 pub struct DepartmentInfo {
@@ -59,12 +64,14 @@ fn slugify(name: &str) -> String {
     format!("{base}-{suffix}")
 }
 
-/// Reject unless `user_id` has `users.is_admin = true`. Admin-only commands
-/// (org-wide department creation, LoRA adapter registration) run on
-/// `admin_pool`, which bypasses RLS entirely — this application-level check
-/// is the *only* gate on them, so every admin-only command must call it
-/// before doing anything else.
-async fn require_admin(state: &State<'_, AppState>, user_id: Uuid) -> Result<(), String> {
+/// Reject unless the signed-in user has `users.is_admin = true`; returns
+/// their id. Admin-only commands run on `admin_pool`, which bypasses RLS
+/// entirely — this check is the *only* gate on them, so every admin-only
+/// command must call it before doing anything else. The flag is read from
+/// the database on every call, not from the session, so a demotion applies
+/// immediately.
+async fn require_admin(state: &State<'_, AppState>, session: &State<'_, Session>) -> Result<Uuid, String> {
+    let user_id = session.require()?.id;
     let is_admin: Option<bool> = sqlx::query_scalar("SELECT is_admin FROM users WHERE id = $1")
         .bind(user_id)
         .fetch_optional(&state.admin_pool)
@@ -72,7 +79,7 @@ async fn require_admin(state: &State<'_, AppState>, user_id: Uuid) -> Result<(),
         .map_err(|e| e.to_string())?;
 
     match is_admin {
-        Some(true) => Ok(()),
+        Some(true) => Ok(user_id),
         _ => Err("Admin privileges required.".to_string()),
     }
 }
@@ -81,10 +88,10 @@ async fn require_admin(state: &State<'_, AppState>, user_id: Uuid) -> Result<(),
 /// for the RLS-scoped listing ordinary users (e.g. the upload picker) should use.
 #[tauri::command]
 pub async fn cmd_list_departments(
-    state:              State<'_, AppState>,
-    requesting_user_id: Uuid,
+    state:   State<'_, AppState>,
+    session: State<'_, Session>,
 ) -> Result<Vec<DepartmentInfo>, String> {
-    require_admin(&state, requesting_user_id).await?;
+    require_admin(&state, &session).await?;
     sqlx::query_as::<_, DepartmentInfo>("SELECT id, name FROM departments ORDER BY name")
         .fetch_all(&state.admin_pool)
         .await
@@ -98,8 +105,10 @@ pub async fn cmd_list_departments(
 #[tauri::command]
 pub async fn cmd_list_my_departments(
     state:   State<'_, AppState>,
-    user_id: Uuid,
+    session: State<'_, Session>,
 ) -> Result<Vec<DepartmentInfo>, String> {
+    let user_id = session.require()?.id;
+
     // Must be one explicit transaction: set_config(..., true) is
     // transaction-local, so setting it on a bare acquired connection with no
     // BEGIN reverts before the SELECT below ever runs (CLAUDE.md invariant #2).
@@ -118,24 +127,33 @@ pub async fn cmd_list_my_departments(
 /// Create a new org-wide department. Admin-only.
 #[derive(Deserialize)]
 pub struct CreateDeptArgs {
-    pub requesting_user_id: Uuid,
     pub name: String,
 }
 
 #[tauri::command]
 pub async fn cmd_create_department(
-    state: State<'_, AppState>,
-    args:  CreateDeptArgs,
+    state:   State<'_, AppState>,
+    session: State<'_, Session>,
+    args:    CreateDeptArgs,
 ) -> Result<DepartmentInfo, String> {
-    require_admin(&state, args.requesting_user_id).await?;
-    sqlx::query_as::<_, DepartmentInfo>(
+    let admin_id = require_admin(&state, &session).await?;
+
+    let mut tx = state.admin_pool.begin().await.map_err(|e| e.to_string())?;
+    let dept = sqlx::query_as::<_, DepartmentInfo>(
         "INSERT INTO departments (name, slug) VALUES ($1, $2) RETURNING id, name",
     )
     .bind(&args.name)
     .bind(slugify(&args.name))
-    .fetch_one(&state.admin_pool)
+    .fetch_one(&mut *tx)
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+
+    audit::record(&mut tx, Some(admin_id), Some(dept.id), event::DEPARTMENT_CREATED, serde_json::json!({ "name": dept.name }))
+        .await
+        .map_err(|e| e.to_string())?;
+
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(dept)
 }
 
 /// One user's membership in one department, with display names for the
@@ -151,10 +169,10 @@ pub struct MembershipInfo {
 /// List every membership in the org. Admin-only.
 #[tauri::command]
 pub async fn cmd_list_memberships(
-    state:              State<'_, AppState>,
-    requesting_user_id: Uuid,
+    state:   State<'_, AppState>,
+    session: State<'_, Session>,
 ) -> Result<Vec<MembershipInfo>, String> {
-    require_admin(&state, requesting_user_id).await?;
+    require_admin(&state, &session).await?;
     sqlx::query_as::<_, MembershipInfo>(
         r#"
         SELECT u.id AS user_id, u.username, d.id AS department_id, d.name AS department_name
@@ -176,18 +194,20 @@ pub async fn cmd_list_memberships(
 /// effect on the member's very next transaction — no re-login, no cache.
 #[derive(Deserialize)]
 pub struct MembershipArgs {
-    pub requesting_user_id: Uuid,
-    pub user_id:            Uuid,
-    pub department_id:      Uuid,
+    pub user_id:       Uuid,
+    pub department_id: Uuid,
 }
 
 #[tauri::command]
 pub async fn cmd_add_member(
-    state: State<'_, AppState>,
-    args:  MembershipArgs,
+    state:   State<'_, AppState>,
+    session: State<'_, Session>,
+    args:    MembershipArgs,
 ) -> Result<(), String> {
-    require_admin(&state, args.requesting_user_id).await?;
-    sqlx::query(
+    let admin_id = require_admin(&state, &session).await?;
+
+    let mut tx = state.admin_pool.begin().await.map_err(|e| e.to_string())?;
+    let added = sqlx::query(
         r#"
         INSERT INTO department_members (user_id, department_id)
         VALUES ($1, $2)
@@ -196,24 +216,46 @@ pub async fn cmd_add_member(
     )
     .bind(args.user_id)
     .bind(args.department_id)
-    .execute(&state.admin_pool)
+    .execute(&mut *tx)
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())?
+    .rows_affected();
+
+    // Only a real change is an event; re-adding an existing member is a no-op.
+    if added > 0 {
+        audit::record(&mut tx, Some(admin_id), Some(args.department_id), event::MEMBER_ADDED, serde_json::json!({ "user_id": args.user_id }))
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    tx.commit().await.map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
 pub async fn cmd_remove_member(
-    state: State<'_, AppState>,
-    args:  MembershipArgs,
+    state:   State<'_, AppState>,
+    session: State<'_, Session>,
+    args:    MembershipArgs,
 ) -> Result<(), String> {
-    require_admin(&state, args.requesting_user_id).await?;
-    sqlx::query("DELETE FROM department_members WHERE user_id = $1 AND department_id = $2")
+    let admin_id = require_admin(&state, &session).await?;
+
+    let mut tx = state.admin_pool.begin().await.map_err(|e| e.to_string())?;
+    let removed = sqlx::query("DELETE FROM department_members WHERE user_id = $1 AND department_id = $2")
         .bind(args.user_id)
         .bind(args.department_id)
-        .execute(&state.admin_pool)
+        .execute(&mut *tx)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+        .rows_affected();
+
+    if removed > 0 {
+        audit::record(&mut tx, Some(admin_id), Some(args.department_id), event::MEMBER_REMOVED, serde_json::json!({ "user_id": args.user_id }))
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    tx.commit().await.map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -221,10 +263,10 @@ pub async fn cmd_remove_member(
 /// org-wide (not scoped to the caller's departments).
 #[tauri::command]
 pub async fn cmd_list_adapters(
-    state:              State<'_, AppState>,
-    requesting_user_id: Uuid,
+    state:   State<'_, AppState>,
+    session: State<'_, Session>,
 ) -> Result<Vec<AdapterInfo>, String> {
-    require_admin(&state, requesting_user_id).await?;
+    require_admin(&state, &session).await?;
     sqlx::query_as::<_, AdapterInfo>(
         r#"
         SELECT da.id, da.department_id, a.file_path AS adapter_path, da.scale, a.is_active
@@ -260,7 +302,6 @@ pub async fn cmd_list_adapters(
 /// newly-added adapter won't be usable until the sidecar restarts.
 #[derive(Deserialize)]
 pub struct AddAdapterArgs {
-    pub requesting_user_id: Uuid,
     pub department_id: Uuid,
     pub adapter_path:  String,
     pub scale:         f32,
@@ -268,10 +309,11 @@ pub struct AddAdapterArgs {
 
 #[tauri::command]
 pub async fn cmd_add_adapter(
-    state: State<'_, AppState>,
-    args:  AddAdapterArgs,
+    state:   State<'_, AppState>,
+    session: State<'_, Session>,
+    args:    AddAdapterArgs,
 ) -> Result<AdapterInfo, String> {
-    require_admin(&state, args.requesting_user_id).await?;
+    let admin_id = require_admin(&state, &session).await?;
 
     // Content-addressed like documents: hash the actual file if it's
     // already on disk. An admin may register an adapter assignment before
@@ -328,6 +370,70 @@ pub async fn cmd_add_adapter(
     .await
     .map_err(|e| e.to_string())?;
 
+    audit::record(
+        &mut tx,
+        Some(admin_id),
+        Some(args.department_id),
+        event::ADAPTER_ASSIGNED,
+        serde_json::json!({ "adapter_id": adapter_id, "adapter_path": info.adapter_path, "scale": info.scale }),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(info)
+}
+
+/// One `audit_log` row for display.
+#[derive(Serialize, FromRow, Debug)]
+pub struct AuditEntry {
+    pub id:              Uuid,
+    pub created_at:      chrono::DateTime<chrono::Utc>,
+    pub username:        Option<String>,
+    pub department_name: Option<String>,
+    pub event_type:      String,
+    pub payload:         Option<serde_json::Value>,
+}
+
+/// The audit journal, newest first (UC10). An admin sees every row via
+/// admin_pool; anyone else gets only their own rows, through app_pool and
+/// the `audit_log_own_select` policy — the same RLS path as everything
+/// else a non-admin reads, not a WHERE clause in this function.
+#[tauri::command]
+pub async fn cmd_list_audit(
+    state:   State<'_, AppState>,
+    session: State<'_, Session>,
+    limit:   Option<i64>,
+) -> Result<Vec<AuditEntry>, String> {
+    let user_id = session.require()?.id;
+    let limit = limit.unwrap_or(200).clamp(1, 1000);
+
+    // LEFT JOINs: on the RLS path a department the user has since left
+    // comes back as NULL instead of leaking its name.
+    let sql = r#"
+        SELECT a.id, a.created_at, u.username, d.name AS department_name, a.event_type, a.payload
+        FROM audit_log a
+        LEFT JOIN users       u ON u.id = a.user_id
+        LEFT JOIN departments d ON d.id = a.department_id
+        ORDER BY a.created_at DESC
+        LIMIT $1
+    "#;
+
+    if require_admin(&state, &session).await.is_ok() {
+        return sqlx::query_as::<_, AuditEntry>(sql)
+            .bind(limit)
+            .fetch_all(&state.admin_pool)
+            .await
+            .map_err(|e| e.to_string());
+    }
+
+    let mut tx = state.app_pool.begin().await.map_err(|e| e.to_string())?;
+    set_current_user(&mut tx, user_id).await.map_err(|e| e.to_string())?;
+    let rows = sqlx::query_as::<_, AuditEntry>(sql)
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(rows)
 }

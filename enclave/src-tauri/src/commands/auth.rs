@@ -7,7 +7,11 @@ use sqlx::{FromRow, Row};
 use tauri::State;
 use uuid::Uuid;
 
-use crate::AppState;
+use crate::{
+    AppState,
+    audit::{self, event},
+    session::{Session, SessionUser},
+};
 
 #[derive(Serialize, Deserialize, FromRow, Clone, Debug)]
 pub struct UserInfo {
@@ -51,8 +55,9 @@ pub struct CreateUserArgs {
 
 #[tauri::command]
 pub async fn cmd_create_user(
-    state: State<'_, AppState>,
-    args:  CreateUserArgs,
+    state:   State<'_, AppState>,
+    session: State<'_, Session>,
+    args:    CreateUserArgs,
 ) -> Result<UserInfo, String> {
     let pin_hash = hash_pin(&args.pin)?;
 
@@ -100,6 +105,19 @@ pub async fn cmd_create_user(
     .await
     .map_err(|e| e.to_string())?;
 
+    // Profiles are created from the login screen, usually with nobody
+    // signed in — then the new user is recorded as creating themselves.
+    let actor = session.get().map(|u| u.id).unwrap_or(user.id);
+    audit::record(
+        &mut tx,
+        Some(actor),
+        Some(dept_id),
+        event::USER_CREATED,
+        serde_json::json!({ "user_id": user.id, "username": user.username, "is_admin": user.is_admin }),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
     tx.commit().await.map_err(|e| e.to_string())?;
 
     Ok(user)
@@ -123,8 +141,9 @@ pub struct LoginResult {
 
 #[tauri::command]
 pub async fn cmd_login(
-    state: State<'_, AppState>,
-    args:  LoginArgs,
+    state:   State<'_, AppState>,
+    session: State<'_, Session>,
+    args:    LoginArgs,
 ) -> Result<LoginResult, String> {
     let row = sqlx::query(
         "SELECT id, username, password_hash, is_admin FROM users WHERE id = $1",
@@ -136,26 +155,63 @@ pub async fn cmd_login(
 
     let empty = LoginResult { ok: false, user_id: None, username: None, is_admin: None };
 
-    match row {
-        None => Ok(empty),
-        Some(r) => {
-            let stored: String = r.get("password_hash");
-            if verify_pin(&args.pin, &stored) {
-                Ok(LoginResult {
-                    ok:       true,
-                    user_id:  Some(r.get("id")),
-                    username: Some(r.get("username")),
-                    is_admin: Some(r.get("is_admin")),
-                })
-            } else {
-                Ok(empty)
-            }
-        }
+    // A failed attempt on any profile ends the previous session: the
+    // screen is being handed to someone else.
+    session.clear();
+
+    let Some(r) = row else {
+        return Ok(empty);
+    };
+
+    let stored: String = r.get("password_hash");
+    if !verify_pin(&args.pin, &stored) {
+        record_on_admin_pool(&state, Some(args.user_id), event::LOGIN_FAILED).await?;
+        return Ok(empty);
     }
+
+    let user = SessionUser {
+        id:       r.get("id"),
+        username: r.get("username"),
+        is_admin: r.get("is_admin"),
+    };
+    record_on_admin_pool(&state, Some(user.id), event::LOGIN).await?;
+    session.set(user.clone());
+
+    Ok(LoginResult {
+        ok:       true,
+        user_id:  Some(user.id),
+        username: Some(user.username),
+        is_admin: Some(user.is_admin),
+    })
 }
 
-/// Clear session — stateless in Rust; the frontend clears its store.
+/// End the session in the core. Every user-scoped command fails with
+/// "Not signed in." from here until the next successful `cmd_login`.
 #[tauri::command]
-pub async fn cmd_logout() -> Result<(), String> {
+pub async fn cmd_logout(
+    state:   State<'_, AppState>,
+    session: State<'_, Session>,
+) -> Result<(), String> {
+    if let Some(user) = session.get() {
+        record_on_admin_pool(&state, Some(user.id), event::LOGOUT).await?;
+    }
+    session.clear();
     Ok(())
+}
+
+/// Who the core considers signed in. The frontend restores its state from
+/// this on startup instead of keeping its own copy, so the UI can never
+/// show a user the core does not have a session for.
+#[tauri::command]
+pub async fn cmd_current_session(session: State<'_, Session>) -> Result<Option<SessionUser>, String> {
+    Ok(session.get())
+}
+
+/// Login/logout run before or after a user context exists, so their audit
+/// rows go through admin_pool — the same pool that verifies the PIN.
+async fn record_on_admin_pool(state: &State<'_, AppState>, user_id: Option<Uuid>, event_type: &str) -> Result<(), String> {
+    let mut conn = state.admin_pool.acquire().await.map_err(|e| e.to_string())?;
+    audit::record(&mut conn, user_id, None, event_type, serde_json::json!({}))
+        .await
+        .map_err(|e| e.to_string())
 }

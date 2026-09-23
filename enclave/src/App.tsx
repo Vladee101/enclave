@@ -95,7 +95,8 @@ function AppShell() {
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const { user } = useAuth();
+  const { user, ready } = useAuth();
+  if (!ready) return null; // asking the core who is signed in; avoids a login-screen flash
   return user ? <AppShell /> : <LoginPage />;
 }
 

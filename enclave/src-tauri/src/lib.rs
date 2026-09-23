@@ -3,6 +3,8 @@ pub mod ingest;
 pub mod llm;
 pub mod retrieval;
 pub mod commands;
+pub mod audit;
+pub mod session;
 
 use anyhow::Context;
 use sqlx::PgPool;
@@ -51,6 +53,7 @@ pub fn run() {
             let ingest_pool = app_state.ingest_pool.clone();
             app.manage(app_state);
             app.manage(llm_client);
+            app.manage(session::Session::default());
 
             let app2 = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -65,6 +68,7 @@ pub fn run() {
             commands::auth::cmd_logout,
             commands::auth::cmd_list_users,
             commands::auth::cmd_create_user,
+            commands::auth::cmd_current_session,
             commands::documents::cmd_upload_document,
             commands::documents::cmd_list_documents,
             commands::documents::cmd_get_job_status,
@@ -76,6 +80,7 @@ pub fn run() {
             commands::admin::cmd_list_memberships,
             commands::admin::cmd_add_member,
             commands::admin::cmd_remove_member,
+            commands::admin::cmd_list_audit,
             commands::admin::cmd_list_adapters,
             commands::admin::cmd_add_adapter,
         ])
