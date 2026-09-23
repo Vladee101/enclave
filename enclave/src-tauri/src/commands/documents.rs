@@ -63,22 +63,72 @@ pub async fn cmd_upload_document(
     let mut tx = state.app_pool.begin().await.map_err(|e| e.to_string())?;
     set_current_user(&mut tx, args.user_id).await.map_err(|e| e.to_string())?;
 
-    let doc_id: Uuid = sqlx::query_scalar(
+    // ON CONFLICT rather than a pre-check: two concurrent uploads of the same
+    // file must not race each other into the UNIQUE (department_id,
+    // file_hash) constraint. RLS still applies — a non-member's INSERT is
+    // rejected by documents_dept_insert before the conflict clause matters.
+    let inserted: Option<Uuid> = sqlx::query_scalar(
         r#"
         INSERT INTO documents (department_id, title, file_hash, mime_type, byte_size, uploaded_by)
         VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (department_id, file_hash) DO NOTHING
         RETURNING id
         "#,
     )
     .bind(args.department_id)
-    .bind(args.filename)
-    .bind(file_hash)
+    .bind(&args.filename)
+    .bind(&file_hash)
     .bind(mime_type)
     .bind(byte_size)
     .bind(args.user_id)
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
+
+    let doc_id = match inserted {
+        Some(id) => id,
+        None => {
+            // Same bytes already uploaded to this department: hand back the
+            // existing document instead of a duplicate (FR15). A failed one
+            // gets a fresh job below — re-uploading is the retry path.
+            let (id, status): (Uuid, String) = sqlx::query_as(
+                "SELECT id, status FROM documents WHERE department_id = $1 AND file_hash = $2",
+            )
+            .bind(args.department_id)
+            .bind(&file_hash)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+
+            let latest_job = sqlx::query_as::<_, JobStatus>(
+                r#"
+                SELECT id AS job_id, document_id, status, attempts, error AS error_text
+                FROM ingestion_jobs
+                WHERE document_id = $1
+                ORDER BY created_at DESC
+                LIMIT 1
+                "#,
+            )
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+
+            if status != "failed" {
+                if let Some(job) = latest_job {
+                    tx.commit().await.map_err(|e| e.to_string())?;
+                    return Ok(job);
+                }
+            }
+
+            sqlx::query("UPDATE documents SET status = 'pending', updated_at = now() WHERE id = $1")
+                .bind(id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| e.to_string())?;
+            id
+        }
+    };
 
     let job_id: Uuid = sqlx::query_scalar(
         "INSERT INTO ingestion_jobs (document_id, status) VALUES ($1, 'queued') RETURNING id",

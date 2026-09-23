@@ -7,6 +7,8 @@ import { FormField } from '../components/FormField';
 
 interface Dept    { id: string; name: string; }
 interface Adapter { id: string; department_id: string; adapter_path: string; scale: number; is_active: boolean; }
+interface UserRow { id: string; username: string; is_admin: boolean; }
+interface Membership { user_id: string; username: string; department_id: string; department_name: string; }
 
 export function AdminPage() {
   const { user } = useAuth();
@@ -18,18 +20,28 @@ export function AdminPage() {
     adapter_path:  '',
     scale:         '1.0',
   });
+  const [users,       setUsers]       = useState<UserRow[]>([]);
+  const [memberships, setMemberships] = useState<Membership[]>([]);
+  const [memberForm,  setMemberForm]  = useState({ user_id: '', department_id: '' });
   const [saving, setSaving] = useState(false);
 
   async function load() {
     if (!user) return;
-    const [d, a] = await Promise.all([
+    const [d, a, u, m] = await Promise.all([
       invoke<Dept[]>('cmd_list_departments', { requestingUserId: user.id }),
       invoke<Adapter[]>('cmd_list_adapters', { requestingUserId: user.id }),
+      invoke<UserRow[]>('cmd_list_users'),
+      invoke<Membership[]>('cmd_list_memberships', { requestingUserId: user.id }),
     ]);
     setDepts(d);
     setAdapters(a);
+    setUsers(u);
+    setMemberships(m);
     if (d.length > 0 && !adapterForm.department_id) {
       setAdapterForm(prev => ({ ...prev, department_id: d[0].id }));
+    }
+    if (d.length > 0 && u.length > 0 && !memberForm.user_id) {
+      setMemberForm({ user_id: u[0].id, department_id: d[0].id });
     }
   }
 
@@ -45,6 +57,25 @@ export function AdminPage() {
     setNewDept('');
     await load();
     setSaving(false);
+  }
+
+  async function addMember(e: React.FormEvent) {
+    e.preventDefault();
+    if (!user) return;
+    setSaving(true);
+    await invoke('cmd_add_member', {
+      args: { requesting_user_id: user.id, ...memberForm },
+    }).catch(console.error);
+    await load();
+    setSaving(false);
+  }
+
+  async function removeMember(m: Membership) {
+    if (!user) return;
+    await invoke('cmd_remove_member', {
+      args: { requesting_user_id: user.id, user_id: m.user_id, department_id: m.department_id },
+    }).catch(console.error);
+    await load();
   }
 
   async function addAdapter(e: React.FormEvent) {
@@ -108,6 +139,69 @@ export function AdminPage() {
             required
           />
           <Button id="create-dept-btn" type="submit" loading={saving} spinnerSize={14} style={{ flexShrink: 0 }}>
+            + Add
+          </Button>
+        </form>
+      </div>
+
+      {/* ── Members ── */}
+      <div className="card">
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontWeight: 600, fontSize: 15 }}>Members</div>
+          <div className="text-sm text-muted" style={{ marginTop: 2 }}>
+            Membership is what RLS checks on every query (ADR-0008): a change applies to the member's next request.
+          </div>
+        </div>
+
+        {memberships.length > 0 && (
+          <table className="admin-table" style={{ marginBottom: 20 }}>
+            <thead>
+              <tr>
+                <th>Department</th>
+                <th>User</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {memberships.map(m => (
+                <tr key={`${m.department_id}:${m.user_id}`}>
+                  <td style={{ fontWeight: 500 }}>{m.department_name}</td>
+                  <td>{m.username}</td>
+                  <td style={{ textAlign: 'right' }}>
+                    <Button variant="ghost" onClick={() => removeMember(m)}>Remove</Button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+
+        <form onSubmit={addMember} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: 10, alignItems: 'end' }}>
+          <FormField label="User" htmlFor="member-user" style={{ marginBottom: 0 }}>
+            <select
+              id="member-user"
+              aria-label="User"
+              className="input"
+              value={memberForm.user_id}
+              onChange={e => setMemberForm(p => ({ ...p, user_id: e.target.value }))}
+              required
+            >
+              {users.map(u => <option key={u.id} value={u.id}>{u.username}</option>)}
+            </select>
+          </FormField>
+          <FormField label="Department" htmlFor="member-dept" style={{ marginBottom: 0 }}>
+            <select
+              id="member-dept"
+              aria-label="Department"
+              className="input"
+              value={memberForm.department_id}
+              onChange={e => setMemberForm(p => ({ ...p, department_id: e.target.value }))}
+              required
+            >
+              {depts.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+            </select>
+          </FormField>
+          <Button id="add-member-btn" type="submit" loading={saving} spinnerSize={14} style={{ flexShrink: 0 }}>
             + Add
           </Button>
         </form>

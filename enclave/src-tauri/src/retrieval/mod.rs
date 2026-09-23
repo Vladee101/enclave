@@ -45,6 +45,12 @@ pub async fn retrieve(
         JOIN chunks    c ON c.id = ce.chunk_id
         JOIN documents d ON d.id = c.document_id
         WHERE d.status = 'ready'
+          -- Only vectors from the model that embedded the query: cosine
+          -- between vectors of two different models is meaningless, and
+          -- ADR-0007 keeps old-model rows around during re-embedding.
+          AND ce.embedding_model_id = (
+                SELECT id FROM embedding_models WHERE is_active = true LIMIT 1
+              )
         ORDER BY ce.embedding <=> $1::vector
         LIMIT $2
         "#

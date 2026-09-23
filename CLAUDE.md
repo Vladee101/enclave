@@ -141,6 +141,7 @@ implementation.
 - **0013 — Content-addressed blob storage.** The `{blob_root}/{file_hash}` store
   and the dedup it enables.
 - **0014 — PostgreSQL distribution.** Resolve the packaging question above.
-- (Also note, not necessarily an ADR) the `token_count` chars/4 heuristic and
-  the no-backoff retry path in `ingest.rs` are deliberate simplifications, both
-  commented in-line; revisit if they bite.
+- (Also note, not necessarily an ADR) the `token_count` chars/4 heuristic is a
+  deliberate simplification, commented in-line; revisit if it bites. Ingestion
+  retries are no longer a simplification: transient (HTTP) failures are
+  requeued with backoff up to 3 attempts (`ingest/jobs.rs`, migrations/008).

@@ -88,13 +88,17 @@ export function DocumentsPage() {
           file_contents,
         },
       });
-      // Optimistically add to list.
-      setDocs(prev => [{
-        id: job.document_id,
-        filename: file.name,
-        status: 'pending',
-        department_id: deptId,
-      }, ...prev]);
+      // Optimistically add to list — unless this was a re-upload of a file
+      // the department already has, in which case the backend returned the
+      // existing document (requeued if it had failed).
+      setDocs(prev => prev.some(d => d.id === job.document_id)
+        ? prev.map(d => d.id === job.document_id && job.status === 'queued' ? { ...d, status: 'pending' } : d)
+        : [{
+            id: job.document_id,
+            filename: file.name,
+            status: 'pending',
+            department_id: deptId,
+          }, ...prev]);
       setPending(prev => ({ ...prev, [job.document_id]: job.job_id }));
       track(job.job_id);
     } catch (e) {

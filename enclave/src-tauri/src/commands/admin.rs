@@ -138,6 +138,85 @@ pub async fn cmd_create_department(
     .map_err(|e| e.to_string())
 }
 
+/// One user's membership in one department, with display names for the
+/// Admin page table.
+#[derive(Serialize, FromRow, Debug)]
+pub struct MembershipInfo {
+    pub user_id:         Uuid,
+    pub username:        String,
+    pub department_id:   Uuid,
+    pub department_name: String,
+}
+
+/// List every membership in the org. Admin-only.
+#[tauri::command]
+pub async fn cmd_list_memberships(
+    state:              State<'_, AppState>,
+    requesting_user_id: Uuid,
+) -> Result<Vec<MembershipInfo>, String> {
+    require_admin(&state, requesting_user_id).await?;
+    sqlx::query_as::<_, MembershipInfo>(
+        r#"
+        SELECT u.id AS user_id, u.username, d.id AS department_id, d.name AS department_name
+        FROM department_members dm
+        JOIN users       u ON u.id = dm.user_id
+        JOIN departments d ON d.id = dm.department_id
+        ORDER BY d.name, u.username
+        "#,
+    )
+    .fetch_all(&state.admin_pool)
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Add or remove one user's membership in one department. Admin-only.
+///
+/// Membership is the single input every RLS policy keys off
+/// (`is_member_of()` reads `department_members`), so a change here takes
+/// effect on the member's very next transaction — no re-login, no cache.
+#[derive(Deserialize)]
+pub struct MembershipArgs {
+    pub requesting_user_id: Uuid,
+    pub user_id:            Uuid,
+    pub department_id:      Uuid,
+}
+
+#[tauri::command]
+pub async fn cmd_add_member(
+    state: State<'_, AppState>,
+    args:  MembershipArgs,
+) -> Result<(), String> {
+    require_admin(&state, args.requesting_user_id).await?;
+    sqlx::query(
+        r#"
+        INSERT INTO department_members (user_id, department_id)
+        VALUES ($1, $2)
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(args.user_id)
+    .bind(args.department_id)
+    .execute(&state.admin_pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn cmd_remove_member(
+    state: State<'_, AppState>,
+    args:  MembershipArgs,
+) -> Result<(), String> {
+    require_admin(&state, args.requesting_user_id).await?;
+    sqlx::query("DELETE FROM department_members WHERE user_id = $1 AND department_id = $2")
+        .bind(args.user_id)
+        .bind(args.department_id)
+        .execute(&state.admin_pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// List all LoRA adapter assignments. Admin-only, since it lists them
 /// org-wide (not scoped to the caller's departments).
 #[tauri::command]

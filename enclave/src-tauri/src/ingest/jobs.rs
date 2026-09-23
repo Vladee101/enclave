@@ -1,7 +1,24 @@
 use sqlx::{PgPool, Row};
 use tauri::{AppHandle, Manager};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use uuid::Uuid;
+
+/// Total attempts (first run included) before a transient failure becomes
+/// a permanent `failed` (migrations/008).
+const MAX_ATTEMPTS: i32 = 3;
+
+/// Backoff before the next attempt: 30 s, then 60 s.
+fn retry_delay_secs(attempts: i32) -> i64 {
+    30 * 2i64.pow((attempts - 1).max(0) as u32)
+}
+
+/// Transient = the embedding sidecar's HTTP call failed (timeout, refused
+/// connection, 5xx). Everything else — missing blob, no active embedding
+/// model, dimension mismatch, a policy/constraint error — fails the same
+/// way on every attempt, so retrying it only delays the real error.
+fn is_transient(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.is::<reqwest::Error>())
+}
 
 /// Background job runner that polls `ingestion_jobs` for queued work
 /// and drives the ingestion pipeline (ADR-0010).
@@ -52,7 +69,8 @@ async fn tick(pool: &PgPool, app: &AppHandle, blob_root: &std::path::Path) -> an
             SELECT id, document_id
             FROM   ingestion_jobs
             WHERE  status = 'queued'
-            ORDER BY created_at
+              AND  run_after <= now()
+            ORDER BY run_after
             LIMIT  1
             FOR UPDATE SKIP LOCKED
         )
@@ -62,7 +80,7 @@ async fn tick(pool: &PgPool, app: &AppHandle, blob_root: &std::path::Path) -> an
                attempts   = attempts + 1
         FROM   claimed
         WHERE  j.id = claimed.id
-        RETURNING j.id, j.document_id
+        RETURNING j.id, j.document_id, j.attempts
         "#
     )
     .fetch_optional(pool)
@@ -74,6 +92,7 @@ async fn tick(pool: &PgPool, app: &AppHandle, blob_root: &std::path::Path) -> an
 
     let job_id: Uuid = row.try_get(0)?;
     let document_id: Uuid = row.try_get(1)?;
+    let attempts: i32 = row.try_get(2)?;
 
     info!("Processing ingestion job {} for document {}", job_id, document_id);
 
@@ -107,6 +126,27 @@ async fn tick(pool: &PgPool, app: &AppHandle, blob_root: &std::path::Path) -> an
                 "#
             )
             .bind(job_id)
+            .execute(pool)
+            .await?;
+        }
+        Err(e) if is_transient(&e) && attempts < MAX_ATTEMPTS => {
+            let err_text = format!("{e:#}");
+            let delay = retry_delay_secs(attempts);
+            warn!("Job {} attempt {}/{} failed, retrying in {}s: {}", job_id, attempts, MAX_ATTEMPTS, delay, err_text);
+
+            // Document stays 'pending': from the user's side it is still
+            // on its way, and `error` shows why it is taking longer.
+            sqlx::query(
+                r#"
+                UPDATE ingestion_jobs
+                SET status = 'queued', started_at = NULL, error = $2,
+                    run_after = now() + make_interval(secs => $3)
+                WHERE id = $1
+                "#
+            )
+            .bind(job_id)
+            .bind(err_text)
+            .bind(delay as f64)
             .execute(pool)
             .await?;
         }

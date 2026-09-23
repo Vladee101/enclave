@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tauri_plugin_shell::ShellExt;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
@@ -18,6 +18,25 @@ pub mod adapters;
 /// `vector(768)` column on `chunk_embeddings`.
 const EMBEDDING_MODEL_NAME: &str = "nomic-embed-text-v1.5";
 const EMBEDDING_MODEL_DIMENSION: i32 = 768;
+
+/// Resolve a model file to an absolute path and confirm it exists, so a
+/// missing file fails here with the path in the message instead of as a
+/// silent sidecar exit and a 60-second health-check timeout.
+///
+/// `ENCLAVE_MODELS_DIR` overrides the default `{app_data_dir}/models` —
+/// handy in development to keep multi-GB weights out of the app data dir.
+/// Relative paths are never passed to the sidecar: they would resolve
+/// against the process's working directory, which is not stable once the
+/// app is installed.
+fn model_path(app: &AppHandle, file_name: &str) -> Result<String> {
+    let dir = match std::env::var_os("ENCLAVE_MODELS_DIR") {
+        Some(dir) => std::path::PathBuf::from(dir),
+        None => app.path().app_data_dir().context("Could not resolve app data dir")?.join("models"),
+    };
+    let path = dir.join(file_name);
+    anyhow::ensure!(path.is_file(), "model file not found: {}", path.display());
+    Ok(path.to_string_lossy().into_owned())
+}
 
 /// Shared HTTP client for the llama-server sidecar(s).
 /// Managed as Tauri state after `LlmClient::spawn()`.
@@ -85,9 +104,7 @@ impl LlmClient {
             // llama.cpp clips to what actually fits, so this is safe on any
             // GPU (falls back toward CPU if none/small).
             "--n-gpu-layers".into(), "999".into(),
-            // Model path is resolved from app data dir at runtime.
-            // Placeholder: users configure via the Admin page.
-            "--model".into(), "models/base.gguf".into(),
+            "--model".into(), model_path(app, "base.gguf")?,
         ];
         for path in &adapter_paths {
             args.push("--lora".into());
@@ -129,6 +146,7 @@ impl LlmClient {
     /// lookup finds it. Returns the embedding server's base URL on success.
     async fn spawn_embedding_sidecar(app: &AppHandle, http: &Client, pool: &PgPool) -> Result<String> {
         let base_url = "http://127.0.0.1:8081".to_string();
+        let model = model_path(app, "embed.gguf")?;
 
         let shell = app.shell();
         let (_rx, _child) = shell
@@ -140,7 +158,7 @@ impl LlmClient {
                 "--n-gpu-layers", "999",
                 // Place a small embedding GGUF (e.g. nomic-embed-text-v1.5,
                 // ~80-150MB quantized) here — separate from the chat model.
-                "--model", "models/embed.gguf",
+                "--model", &model,
             ])
             .spawn()
             .context("Failed to spawn embedding llama-server")?;
