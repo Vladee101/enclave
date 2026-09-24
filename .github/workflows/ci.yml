@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Rust unit tests + rls_validation: the proof that department isolation
+  # (ADR-0008), deletion rules (ADR-0015/0017) and least privilege
+  # (ADR-0018) hold. A failure here is a release blocker (CLAUDE.md).
+  rust:
+    name: Rust tests + RLS validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Superuser, used by the test to create its throwaway database and run
+      # migrations; the database name in the URL is replaced by the test.
+      TEST_ADMIN_URL: postgres://postgres:postgres@localhost:5432/postgres
+      # The RLS-bound login role created by migration 004.
+      TEST_APP_URL: postgres://enclave_app:change_me_in_production@localhost:5432/postgres
+      # Without this a missing URL makes rls_validation skip and pass —
+      # green, and proving nothing.
+      ENCLAVE_REQUIRE_DB_TESTS: "1"
+      CARGO_TERM_COLOR: always
+
+    defaults:
+      run:
+        working-directory: enclave
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tauri's system libraries (webkit2gtk etc.) — needed to compile the
+      # tauri crate even though no window is ever opened in tests.
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev libssl-dev build-essential
+
+      # Pinned here, not in a rust-toolchain.toml: a repo-level pin makes
+      # every local build depend on downloading that exact toolchain. This is
+      # the version the code was last built and tested with locally (stable
+      # at the time); bump it deliberately, not by the runner's default.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: enclave
+
+      - name: Build tests
+        run: cargo test --workspace --no-run --locked
+
+      - name: Run tests
+        run: cargo test --workspace --locked -- --nocapture
+
+  # Type-check and build the React frontend.
+  frontend:
+    name: Frontend typecheck + build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    defaults:
+      run:
+        working-directory: enclave
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: enclave/pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+
+      # `build` is `tsc && vite build`: a type error fails the job.
+      - run: pnpm build

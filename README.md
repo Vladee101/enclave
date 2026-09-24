@@ -16,7 +16,7 @@ Records. Код следует этим записям, а не наоборот
 
 ## Быстрый старт
 
-Нужны Docker, Rust 1.91+, Node 20+ и pnpm.
+Нужны Docker, Rust (стабильный; CI собирает на 1.96.0), Node 20+ и pnpm.
 
 ```bash
 docker run -d --name enclave-db -p 5433:5432 \
@@ -31,7 +31,7 @@ cd enclave && pnpm install
 pnpm tauri dev
 ```
 
-Миграции (`enclave/migrations/001-008`) применяются автоматически при каждом
+Миграции (`enclave/migrations/001-012`) применяются автоматически при каждом
 старте через `sqlx::migrate!` под `ADMIN_DATABASE_URL`; они же создают роли
 `enclave_app` (запросы под RLS) и `ingest_worker` (BYPASSRLS, только воркер
 загрузки). Первый созданный профиль становится администратором. Новый профиль
@@ -136,9 +136,11 @@ export TEST_APP_URL="postgres://enclave_app:change_me_in_production@localhost:54
 cargo test --test rls_validation
 ```
 
-Без обеих переменных тест молча пропускается, поэтому в CI их наличие надо
-проверять отдельно — иначе зелёный прогон ничего не доказывает. Последний
-прогон: `test result: ok. 1 passed` на PostgreSQL 16 + pgvector.
+Без обеих переменных тест молча пропускается — если только не выставлена
+`ENCLAVE_REQUIRE_DB_TESTS`: тогда отсутствие переменных — падение, а не
+зелёный прогон, который ничего не доказывает. CI (`.github/workflows/ci.yml`)
+выставляет её и гоняет тест на каждый push на PostgreSQL 16 + pgvector вместе с
+unit-тестами и сборкой фронтенда.
 
 Тот же результат руками, без сборки Rust, — видно, что политика закрыта по
 умолчанию, а не фильтрует по запросу:

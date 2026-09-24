@@ -65,8 +65,11 @@ app so the `ingest_worker` role exists.
 This has bitten us 3×. **Pending quality-of-life fix:** add `dotenvy` + a
 `.env` in `src-tauri/` so they persist (not yet done).
 
-**Toolchain:** rustc **1.91.1**. Kept sqlx on 0.8 specifically to avoid needing
-rustc 1.94 (sqlx 0.9 requires it). Do not bump sqlx without bumping rustc.
+**Toolchain:** rustc **1.96.0** (stable; an earlier version of this file said
+1.91.1 — it was stale). CI pins the same version in `.github/workflows/ci.yml`;
+there is deliberately no `rust-toolchain.toml`, because it would make every
+local build download that exact toolchain. sqlx stays on 0.8; bump it (and the
+CI pin) deliberately, with a full `cargo test` including `rls_validation`.
 
 ## Fixes applied this session (so you know the code's current state)
 

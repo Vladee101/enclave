@@ -42,6 +42,11 @@ fn with_database(url: &str, db_name: &str) -> String {
 #[tokio::test]
 async fn test_rls_policies() -> Result<(), Box<dyn std::error::Error>> {
     let (Ok(admin_url), Ok(app_url)) = (std::env::var("TEST_ADMIN_URL"), std::env::var("TEST_APP_URL")) else {
+        // A skip is a green run that proved nothing. Where the proof is
+        // required (CI sets ENCLAVE_REQUIRE_DB_TESTS), missing URLs fail.
+        if std::env::var_os("ENCLAVE_REQUIRE_DB_TESTS").is_some() {
+            panic!("ENCLAVE_REQUIRE_DB_TESTS is set but TEST_ADMIN_URL / TEST_APP_URL are not — rls_validation cannot run");
+        }
         eprintln!("TEST_ADMIN_URL / TEST_APP_URL not set — skipping rls_validation (see CLAUDE.md task 12).");
         return Ok(());
     };
@@ -64,14 +69,16 @@ async fn test_rls_policies() -> Result<(), Box<dyn std::error::Error>> {
     // privileges handing app_user write on every new table and EXECUTE on
     // every new function in `public`. Migration 012 must remove them; on a
     // clean database section 9's "table created later" check would pass
-    // trivially. (Roles are cluster-wide; on a brand-new cluster app_user
-    // does not exist before 004, and there is no drift to reproduce.)
+    // trivially. Roles are cluster-wide: on a brand-new cluster (CI) app_user
+    // does not exist before migration 004, so it is created here with the
+    // exact attributes 004 uses — 004's IF NOT EXISTS then leaves it alone.
     sqlx::query(
         "DO $$ BEGIN
-            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_user') THEN
-                ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO app_user;
-                ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO app_user;
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_user') THEN
+                CREATE ROLE app_user NOLOGIN NOINHERIT;
             END IF;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO app_user;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO app_user;
          END $$",
     )
     .execute(&admin_pool)
