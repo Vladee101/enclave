@@ -102,12 +102,13 @@ Plan a calculation only when the question asks for a count, a sum, an average, a
 Plan fields, in this order:
 - table: the table's label (T1, T2, …).
 - metric: what to compute. "count" counts rows (column null) — for "how many". "sum", "avg", "min", "max" of a number column; "min" / "max" of a date column for "earliest" / "latest".
-- group_by: null for one total. A column for "per …", "by …", "each …", "for every …" — one result per value of that column. For a date column also the period: year, month or day.
+- group_by: null for one total. A column for "per …", "by …", "each …", "for every …" — one result per value of that column. Also when the question asks for a number together with a column without naming one value of it ("number of contracts and the manager's name", "who has the most") — the answer needs one number per value of that column. For a date column also the period: year, month or day.
 - filters: only the conditions the question states — none if it states none. Text columns: "contains" / "not_contains"; the value is spelled exactly as in the column's values. Number columns: = != > >= < <= and a plain number. Date columns: = != > >= < <= and YYYY, YYYY-MM or YYYY-MM-DD; "= 2021" means during 2021.
 - order: "desc" (largest first) unless the question asks for the smallest.
 
 Examples, for a table T1 with columns "ФИО" (text), "Отдел" (text): values "Продажи", "ИТ", "Склад"; "Оклад" (number); "Дата приёма" (date):
 - "Сколько сотрудников в ИТ?" → {"answerable": true, "table": "T1", "metric": {"fn": "count", "column": null}, "group_by": null, "filters": [{"column": "Отдел", "op": "contains", "value": "ИТ"}], "order": "desc"}
+- "Количество сотрудников и отдел" → {"answerable": true, "table": "T1", "metric": {"fn": "count", "column": null}, "group_by": {"column": "Отдел"}, "filters": [], "order": "desc"}
 - "Какой средний оклад по отделам?" → {"answerable": true, "table": "T1", "metric": {"fn": "avg", "column": "Оклад"}, "group_by": {"column": "Отдел"}, "filters": [], "order": "desc"}
 - "Сколько человек приняли в 2022 году?" → {"answerable": true, "table": "T1", "metric": {"fn": "count", "column": null}, "group_by": null, "filters": [{"column": "Дата приёма", "op": "=", "value": "2022"}], "order": "desc"}
 - "Сколько приёмов по годам?" → {"answerable": true, "table": "T1", "metric": {"fn": "count", "column": null}, "group_by": {"column": "Дата приёма", "period": "year"}, "filters": [], "order": "desc"}
