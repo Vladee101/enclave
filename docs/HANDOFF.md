@@ -160,8 +160,8 @@ Resolved this session:
 5. **Blob store was never implemented** — uploaded bytes were hashed then
    discarded; `ingest_document` used a hardcoded placeholder string.
    **Fixed**: `cmd_upload_document` writes to `{app_data_dir}/blobs/{file_hash}`;
-   `ingest_document` reads it back (still lossy-UTF-8 decoded — real
-   PDF/DOCX parsing is still future work, same as before).
+   `ingest_document` reads it back. (Text extraction is no longer lossy
+   UTF-8: PDF / DOCX / TXT / MD since ADR-0019, `ingest/extract.rs`.)
 
 Still open (deferred, not blocking Plan A):
 6. **Stale status badge** — uploaded docs show `PENDING` in the UI even though the

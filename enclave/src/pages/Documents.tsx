@@ -212,7 +212,7 @@ export function DocumentsPage() {
           type="file"
           style={{ display: 'none' }}
           multiple
-          accept=".pdf,.doc,.docx,.txt,.md,.xls,.xlsx,.ppt,.pptx"
+          accept=".pdf,.docx,.txt,.md,.markdown"
           onChange={e => { handleFiles(e.target.files); e.target.value = ''; }}
         />
       </div>

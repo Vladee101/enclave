@@ -1,3 +1,7 @@
 # sqlx checksums migration files byte-for-byte: a CRLF checkout of an
 # already-applied migration makes the app refuse to start. Pin them to LF.
 *.sql text eol=lf
+
+# Binary test fixtures: never let autocrlf touch them.
+*.pdf binary
+*.docx binary

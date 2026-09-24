@@ -55,6 +55,9 @@ pub async fn cmd_upload_document(
     args:    UploadArgs,
 ) -> Result<JobStatus, String> {
     let user_id = session.require()?.id;
+    // Refuse what ingestion cannot read before anything is stored: an
+    // immediate error beats a job that fails a minute later (ADR-0019).
+    crate::ingest::extract::check_supported(&args.filename).map_err(|e| e.to_string())?;
     let digest = Sha256::digest(&args.file_contents);
     let file_hash: String = digest.iter().map(|b| format!("{b:02x}")).collect();
     let byte_size = args.file_contents.len() as i64;

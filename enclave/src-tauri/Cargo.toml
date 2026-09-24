@@ -46,3 +46,6 @@ futures = "0.3"
 time = "=0.3.36"
 argon2 = { version = "0.5", features = ["std"] }
 sha2 = "0.10"
+pdf-extract = "0.12"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+quick-xml = "0.38"

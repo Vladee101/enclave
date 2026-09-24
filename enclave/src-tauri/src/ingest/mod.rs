@@ -3,6 +3,7 @@ use sqlx::{PgPool, Row};
 use std::path::Path;
 use uuid::Uuid;
 
+pub mod extract;
 pub mod jobs;
 
 /// Split text content into overlapping chunks.
@@ -62,16 +63,19 @@ pub async fn ingest_document(
     let doc_file_hash: String = doc_row.try_get("file_hash")?;
 
     // ── Read raw bytes from the content-addressed blob store ──────────────
-    // NOTE: this decodes bytes as lossy UTF-8 regardless of mime_type — a
-    // deliberate simplification (like the token_count heuristic below).
-    // Real format-aware extraction (PDF via pdfium, DOCX via docx-rs, etc.)
-    // is future work; today this only produces sensible text for plain-text
-    // uploads (.txt/.md).
     let blob_path = blob_root.join(&doc_file_hash);
     let raw_bytes = tokio::fs::read(&blob_path)
         .await
         .with_context(|| format!("Failed to read blob for document '{}' at {}", doc_filename, blob_path.display()))?;
-    let raw_text = String::from_utf8_lossy(&raw_bytes).into_owned();
+
+    // ── Extract text (PDF / DOCX / TXT / MD, ADR-0019) ────────────────────
+    // CPU-bound — parsing a large PDF takes seconds — so it runs off the
+    // async runtime. Its errors are permanent (not reqwest errors), so the
+    // job fails at once instead of being retried (jobs.rs).
+    let name = doc_filename.clone();
+    let raw_text = tokio::task::spawn_blocking(move || extract::extract_text(&raw_bytes, &name))
+        .await
+        .context("text extraction task failed")??;
 
     // ── Chunk ─────────────────────────────────────────────────────────────
     let chunks = split_into_chunks(&raw_text, 512, 64);
@@ -117,10 +121,9 @@ pub async fn ingest_document(
     anyhow::ensure!(deleted == Some(false), "document deleted during ingestion; nothing written");
 
     for (idx, (content, embedding)) in chunks.iter().zip(embeddings).enumerate() {
-        // token_count: chars/4 heuristic (deliberate simplification, same
-        // spirit as the lossy-UTF-8 text extraction above — revisit if it
-        // bites, per CLAUDE.md's own note on this heuristic). NOT NULL on
-        // the live chunks table with no default, so it must be supplied.
+        // token_count: chars/4 heuristic (deliberate simplification — revisit
+        // if it bites, per CLAUDE.md's own note on this heuristic). NOT NULL
+        // on the live chunks table with no default, so it must be supplied.
         let token_count = ((content.chars().count() / 4).max(1)) as i32;
 
         // Insert chunk.
