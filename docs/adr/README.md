@@ -23,12 +23,14 @@
 | [0008](0008-department-scoped-row-level-security.md) | Row-Level Security в разрезе департаментов      | Принято |
 | [0009](0009-denormalize-department-id.md) | Денормализация department_id в chunks и chunk_embeddings | Принято |
 | [0010](0010-async-document-ingestion.md) | Асинхронная загрузка документов                 | Принято |
-| [0011](0011-defer-dormant-membership-policy-cleanup.md) | Отложенная чистка спящих RLS-политик на memberships | Принято |
+| [0011](0011-defer-dormant-membership-policy-cleanup.md) | Отложенная чистка спящих RLS-политик на memberships | Замещено [0021](0021-rls-membership-once-per-query.md) |
 | [0015](0015-document-deletion.md) | Удаление документов: автор или администратор, контент стирается, остаётся надгробие | Принято |
 | [0016](0016-default-department-admin-assigned-membership.md) | Общий департамент по умолчанию, членство назначает администратор | Принято |
 | [0017](0017-department-deletion.md) | Удаление департамента вместе с документами | Принято |
 | [0018](0018-app-user-least-privilege.md) | Минимальные привилегии роли app_user | Принято |
 | [0019](0019-text-extraction.md) | Извлечение текста: PDF и DOCX на чистом Rust, без OCR | Принято |
+| [0020](0020-spreadsheets-and-retrieval-at-scale.md) | Таблицы (XLSX, XLS, ODS) и поиск на их масштабе | Принято |
+| [0021](0021-rls-membership-once-per-query.md) | Политики RLS вычисляют членство один раз на запрос; спящие политики удалены | Принято |
 
 Номера 0012–0014 зарезервированы за решениями из раздела ниже.
 

@@ -17,6 +17,116 @@ pub struct RetrievedChunk {
     pub score:       f64,
 }
 
+// ─── Lexical leg with IDF (ADR-0020) ─────────────────────────────────────────
+
+/// A word found in at least this many of the visible chunks is too common to
+/// pick anything out (column headers repeated on every spreadsheet row, words
+/// every document shares). Counting stops here, so the cost per query word
+/// is bounded however large the corpus grows.
+const COMMON_DF: i64 = 1000;
+
+/// Full-text leg ranked by word rarity.
+///
+/// Postgres `ts_rank_cd` has no IDF: every matched word counts the same. On a
+/// 50 000-row spreadsheet the question "какая сумма у договора Д-012345"
+/// matched all 50 000 rows on the header words (сумма, договора — df 50 000)
+/// and the one row with "-012345" (df 1) ranked 12 501st. So:
+///
+/// 1. each question word's document frequency is counted over the chunks
+///    this user can see (RLS applies — rarity within their departments),
+///    capped at COMMON_DF;
+/// 2. words below the cap are the selective ones: candidates are the chunks
+///    containing any of them, ranked by the sum of their weights
+///    ln(1 + COMMON_DF / df) — BM25's IDF shape without term frequency;
+///    `ts_rank_cd` over all words breaks ties;
+/// 3. a question with no selective word falls back to OR over all its words
+///    ranked by `ts_rank_cd`, as before.
+///
+/// Also why it is fast again: the old leg evaluated the RLS policy on every
+/// one of the 50 000 candidates (1.2–1.4 s); now candidates are the few rows
+/// holding a rare word. OR rather than plainto_tsquery's AND throughout: an
+/// AND over a natural-language question matched nothing (ADR-0006 note).
+async fn lexical_leg(conn: &mut PgConnection, query_text: &str, limit: i64) -> Result<Vec<sqlx::postgres::PgRow>> {
+    let word_df: Vec<(String, i64)> = sqlx::query_as(
+        r#"
+        SELECT q.lex,
+               (SELECT count(*) FROM (
+                    SELECT 1
+                    FROM chunks c
+                    JOIN documents d ON d.id = c.document_id
+                    WHERE c.content_tsv @@ quote_literal(q.lex)::tsquery
+                      AND d.status = 'ready'
+                      AND d.deleted_at IS NULL
+                    LIMIT $2
+                ) s) AS df
+        FROM unnest(tsvector_to_array(to_tsvector('english', $1))) AS q(lex)
+        "#,
+    )
+    .bind(query_text)
+    .bind(COMMON_DF)
+    .fetch_all(&mut *conn)
+    .await?;
+
+    let (selective, weights): (Vec<String>, Vec<f64>) = word_df
+        .iter()
+        .filter(|(_, df)| *df > 0 && *df < COMMON_DF)
+        .map(|(lex, df)| (lex.clone(), (1.0 + COMMON_DF as f64 / *df as f64).ln()))
+        .unzip();
+    let all_words: Vec<String> = word_df.into_iter().map(|(lex, _)| lex).collect();
+
+    if selective.is_empty() {
+        return Ok(sqlx::query(
+            r#"
+            WITH q AS (
+                SELECT array_to_string(array(SELECT quote_literal(w) FROM unnest($1::text[]) w), ' | ')::tsquery AS tsq
+            )
+            SELECT c.id AS chunk_id, c.document_id, d.title AS filename, c.content
+            FROM chunks c
+            JOIN documents d ON d.id = c.document_id
+            CROSS JOIN q
+            WHERE c.content_tsv @@ q.tsq
+              AND d.status = 'ready'
+              AND d.deleted_at IS NULL
+            ORDER BY ts_rank_cd(c.content_tsv, q.tsq) DESC
+            LIMIT $2
+            "#,
+        )
+        .bind(&all_words)
+        .bind(limit)
+        .fetch_all(&mut *conn)
+        .await?);
+    }
+
+    Ok(sqlx::query(
+        r#"
+        WITH w AS (
+            SELECT t.lex, t.idf, quote_literal(t.lex)::tsquery AS tsq
+            FROM unnest($1::text[], $2::float8[]) AS t(lex, idf)
+        ),
+        q AS (
+            SELECT array_to_string(array(SELECT quote_literal(x) FROM unnest($1::text[]) x), ' | ')::tsquery AS rare,
+                   array_to_string(array(SELECT quote_literal(x) FROM unnest($3::text[]) x), ' | ')::tsquery AS every
+        )
+        SELECT c.id AS chunk_id, c.document_id, d.title AS filename, c.content
+        FROM chunks c
+        JOIN documents d ON d.id = c.document_id
+        CROSS JOIN q
+        WHERE c.content_tsv @@ q.rare
+          AND d.status = 'ready'
+          AND d.deleted_at IS NULL
+        ORDER BY (SELECT sum(w.idf) FROM w WHERE c.content_tsv @@ w.tsq) DESC,
+                 ts_rank_cd(c.content_tsv, q.every) DESC
+        LIMIT $4
+        "#,
+    )
+    .bind(&selective)
+    .bind(&weights)
+    .bind(&all_words)
+    .bind(limit)
+    .fetch_all(&mut *conn)
+    .await?)
+}
+
 // ─── Hybrid retrieval (ADR-0006) ─────────────────────────────────────────────
 
 /// Hybrid retrieval: dense ANN leg + lexical FTS leg, fused via RRF (ADR-0006).
@@ -62,39 +172,7 @@ pub async fn retrieve(
     .await?;
 
     // ── Lexical leg (tsvector FTS) ────────────────────────────────────────
-    // OR over the question's stemmed words, not plainto_tsquery: that ANDs
-    // every word, and a natural-language question ("which port does the
-    // signaling server run on…") matched zero chunks on live data — the leg
-    // was silently dead. With OR, ts_rank_cd ranks chunks matching more of
-    // the words higher. A question of only stopwords yields an empty query,
-    // which matches nothing.
-    let lex_rows = sqlx::query(
-        r#"
-        WITH q AS (
-            SELECT array_to_string(
-                       array(SELECT quote_literal(l)
-                             FROM unnest(tsvector_to_array(to_tsvector('english', $1))) l),
-                       ' | ')::tsquery AS tsq
-        )
-        SELECT
-            c.id        AS chunk_id,
-            c.document_id,
-            d.title     AS filename,
-            c.content
-        FROM chunks    c
-        JOIN documents d ON d.id = c.document_id
-        CROSS JOIN q
-        WHERE c.content_tsv @@ q.tsq
-          AND d.status = 'ready'
-          AND d.deleted_at IS NULL
-        ORDER BY ts_rank_cd(c.content_tsv, q.tsq) DESC
-        LIMIT $2
-        "#
-    )
-    .bind(query_text)
-    .bind(k * 2)
-    .fetch_all(&mut *conn)
-    .await?;
+    let lex_rows = lexical_leg(conn, query_text, k * 2).await?;
 
     // ── RRF fusion ────────────────────────────────────────────────────────
     let dense_ids: Vec<Uuid> = dense_rows.iter().map(|r| r.get::<Uuid, &str>("chunk_id")).collect();

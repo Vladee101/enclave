@@ -7,7 +7,10 @@
 //! Prints the character count, how many 512-character chunks it would
 //! make, and the start of the text (all of it with --full).
 
-use enclave_lib::ingest::{extract::extract_text, split_into_chunks};
+use enclave_lib::ingest::{
+    extract::{extract, Layout},
+    split_into_chunks, split_rows,
+};
 
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
@@ -18,14 +21,21 @@ fn main() -> anyhow::Result<()> {
     let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
 
     let started = std::time::Instant::now();
-    let text = extract_text(&bytes, &name)?;
+    let extracted = extract(&bytes, &name)?;
     let elapsed = started.elapsed();
+    // Same chunking as ingestion, so the count is what the worker would embed.
+    let chunks = match extracted.layout {
+        Layout::Prose => split_into_chunks(&extracted.text, 512, 64),
+        Layout::Rows => split_rows(&extracted.text, 512),
+    };
+    let text = extracted.text;
 
     let chars = text.chars().count();
     println!(
-        "{name}: {} bytes -> {chars} chars, {} chunks, {:.0} ms",
+        "{name}: {} bytes -> {chars} chars ({:?}), {} chunks, {:.0} ms",
         bytes.len(),
-        split_into_chunks(&text, 512, 64).len(),
+        extracted.layout,
+        chunks.len(),
         elapsed.as_secs_f64() * 1000.0
     );
     println!("----");

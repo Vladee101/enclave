@@ -79,26 +79,32 @@ async fn prepare(
 
     tx.commit().await.map_err(|e| e.to_string())?;
 
-    let context = chunks
-        .iter()
-        .enumerate()
-        .map(|(i, c)| format!("[Source {}] {}\n{}", i + 1, c.filename, c.content))
-        .collect::<Vec<_>>()
-        .join("\n\n");
-
-    // Document text goes in the user turn as quoted material, never in the
-    // system turn: an instruction planted in a document stays data.
-    let system = "You answer questions about the organization's documents. \
-                  Use only the sources given in the user's message and cite them as [Source N]. \
-                  If the sources do not contain the answer, say so. \
-                  Answer once, concisely, in the language of the question.";
-    let user = format!("Sources:\n\n{context}\n\nQuestion: {}", args.query);
+    let (system, user) = grounded_messages(&chunks, &args.query);
 
     // Transaction already committed above — this HTTP call holds no
     // connection (CLAUDE.md invariant #4).
     let prompt = llm.apply_template(system, &user).await.map_err(|e| e.to_string())?;
 
     Ok((prompt, lora, chunks))
+}
+
+/// The system and user messages for a grounded answer. Public so the
+/// `retrieve --answer` example asks exactly what the app asks.
+///
+/// Document text goes in the user turn as quoted material, never in the
+/// system turn: an instruction planted in a document stays data.
+pub fn grounded_messages(chunks: &[retrieval::RetrievedChunk], question: &str) -> (&'static str, String) {
+    let context = chunks
+        .iter()
+        .enumerate()
+        .map(|(i, c)| format!("[Source {}] {}\n{}", i + 1, c.filename, c.content))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let system = "You answer questions about the organization's documents. \
+                  Use only the sources given in the user's message and cite them as [Source N]. \
+                  If the sources do not contain the answer, say so. \
+                  Answer once, concisely, in the language of the question.";
+    (system, format!("Sources:\n\n{context}\n\nQuestion: {question}"))
 }
 
 fn into_sources(chunks: Vec<retrieval::RetrievedChunk>) -> Vec<SourceRef> {

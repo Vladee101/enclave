@@ -78,6 +78,16 @@ fn llama_server_exe(app: &AppHandle) -> Result<PathBuf> {
         })
 }
 
+/// llama-server log threshold: errors only.
+///
+/// At its default level the embedding server writes ~3 lines per embedded
+/// text, and every line crosses the stdout pipe the app drains
+/// (`spawn_llama_server`). Measured on 1 000 spreadsheet rows, batches of 32:
+/// the same server did 153 texts/s logging to a file and 95/s through the
+/// app's pipe. Errors still come through (checked: a missing model file is
+/// reported line by line); routine info and per-request lines do not.
+const LLAMA_LOG_VERBOSITY: &str = "1";
+
 /// Start one llama-server and keep draining its output into the log.
 ///
 /// The drain is not optional: an unread stdout/stderr pipe fills up and the
@@ -204,6 +214,8 @@ impl LlmClient {
             // prompt plus 768 generated tokens many times over.
             "--ctx-size".into(), "8192".into(),
             "--parallel".into(), "1".into(),
+            // Errors only (see LLAMA_LOG_VERBOSITY).
+            "--log-verbosity".into(), LLAMA_LOG_VERBOSITY.into(),
             "--model".into(), model_path(app, "base.gguf")?,
         ];
         for path in &adapter_paths {
@@ -262,6 +274,7 @@ impl LlmClient {
             // are 512 characters, far below that.
             "--ctx-size", "2048",
             "--parallel", "1",
+            "--log-verbosity", LLAMA_LOG_VERBOSITY,
             // A small embedding GGUF (nomic-embed-text-v1.5, ~270 MB) —
             // separate from the chat model, see the struct doc.
             "--model", &model,
@@ -413,6 +426,20 @@ impl LlmClient {
     /// `{"embedding":[…]}` parsing here rejected), while `/v1/embeddings`
     /// keeps the `{"data":[{"embedding":[…]}]}` contract.
     pub async fn embed(&self, content: &str, kind: EmbedKind) -> Result<Vec<f32>> {
+        self.embed_batch(&[content], kind)
+            .await?
+            .pop()
+            .context("embedding server returned no data")
+    }
+
+    /// Embed several texts in one request (`input` as an array), returned in
+    /// the order given.
+    ///
+    /// Measured with the app's embedding server settings (nomic-embed-text,
+    /// RTX 4050): one text per request 49 chunks/s, 16 per request 138, 32
+    /// per request 148, 64 no better — 3× faster ingestion, which is what
+    /// makes a 50 000-row spreadsheet a ~6-minute job instead of ~17.
+    pub async fn embed_batch<S: AsRef<str>>(&self, contents: &[S], kind: EmbedKind) -> Result<Vec<Vec<f32>>> {
         let embed_base_url = self
             .embed_base_url
             .as_deref()
@@ -420,7 +447,7 @@ impl LlmClient {
 
         #[derive(Serialize)]
         struct EmbedReq {
-            input: String,
+            input: Vec<String>,
         }
         #[derive(Deserialize)]
         struct EmbedResp {
@@ -428,22 +455,30 @@ impl LlmClient {
         }
         #[derive(Deserialize)]
         struct EmbedData {
+            index: usize,
             embedding: Vec<f32>,
         }
+        let input: Vec<String> = contents.iter().map(|c| format!("{}{}", kind.prefix(), c.as_ref())).collect();
         let resp: EmbedResp = self
             .http
             .post(format!("{embed_base_url}/v1/embeddings"))
-            .json(&EmbedReq { input: format!("{}{content}", kind.prefix()) })
+            .json(&EmbedReq { input })
             .send()
             .await?
             .error_for_status()?
             .json()
             .await?;
-        resp.data
-            .into_iter()
-            .next()
-            .map(|d| d.embedding)
-            .context("embedding server returned no data")
+        anyhow::ensure!(
+            resp.data.len() == contents.len(),
+            "embedding server returned {} vectors for {} inputs",
+            resp.data.len(),
+            contents.len()
+        );
+        // The OpenAI contract carries an index per item; order by it rather
+        // than trusting the array order.
+        let mut data = resp.data;
+        data.sort_by_key(|d| d.index);
+        Ok(data.into_iter().map(|d| d.embedding).collect())
     }
 
     /// Wrap a system + user message in the chat template stored in the

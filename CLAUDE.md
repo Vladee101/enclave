@@ -6,7 +6,7 @@
 ## What this file is
 
 A build brief for the coding agent. **The source of truth for *why* is
-`docs/adr/`** — sixteen accepted Architecture Decision Records (0001–0011, 0015–0019). This file says *what
+`docs/adr/`** — eighteen accepted Architecture Decision Records (0001–0010, 0015–0021; 0011 superseded by 0021). This file says *what
 to build, in what order, and which invariants must never be broken.* When a
 decision here seems arbitrary, the matching ADR explains it. Do not contradict
 an ADR; if reality forces a change, write a new ADR that supersedes the old one
@@ -65,6 +65,10 @@ department's content — enforced in the database, not the app (ADR-0008).
 7. **RLS is the security boundary.** The explicit `department_id` filters in the
    retrieval SQL are for scope and ANN speed only — never rely on them for
    isolation. The `rls_isolation` test exists to enforce this distinction.
+   Policies compute membership **once per query** (ADR-0021):
+   `department_id = ANY ((SELECT current_user_department_ids())::uuid[])` —
+   never a per-row function call; under RLS every search scans the
+   department's rows, so the per-row cost of a policy is the query's cost.
 8. **Two pools, two roles.** `app_pool` (app_user) for all user-facing work;
    `ingest_pool` (ingest_worker) only for the worker.
 9. **Documents are deleted only through `delete_document()`, departments only

@@ -6,6 +6,20 @@ use uuid::Uuid;
 pub mod extract;
 pub mod jobs;
 
+/// Chunks per embedding request. Measured with the app's embedding server
+/// settings: 1 → 49 chunks/s, 16 → 138, 32 → 148, 64 → no better.
+const EMBED_BATCH: usize = 32;
+
+/// Chunks per INSERT statement in the write transaction.
+const WRITE_BATCH: usize = 1000;
+
+/// A document bigger than this is refused instead of occupying the worker
+/// for most of an hour. At the measured ~150 chunks/s that is ~11 minutes of
+/// embedding; a spreadsheet makes about one chunk per row, so ~100 000 rows.
+/// Embeddings are held in memory until the single write transaction
+/// (invariant #4): 100 000 × 768 × 4 bytes ≈ 300 MB at the limit.
+const MAX_CHUNKS_PER_DOCUMENT: usize = 100_000;
+
 /// Split text content into overlapping chunks.
 /// Strategy: fixed-size windows of `chunk_size` characters with
 /// `overlap` characters of context carry-over.
@@ -24,6 +38,43 @@ pub fn split_into_chunks(text: &str, chunk_size: usize, overlap: usize) -> Vec<S
         start += chunk_size - overlap;
     }
 
+    chunks
+}
+
+/// Chunks for one-record-per-line text (spreadsheet rows, `Layout::Rows`):
+/// whole lines packed up to `max_chars`, so a row is never cut between two
+/// chunks — each carries its sheet, row number and headers, and a half row
+/// would lose them. No overlap: rows are self-contained. A single line
+/// longer than `max_chars` (a very wide row) falls back to fixed windows.
+pub fn split_rows(text: &str, max_chars: usize) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut current_len = 0usize;
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let len = line.chars().count();
+        if len > max_chars {
+            if !current.is_empty() {
+                chunks.push(std::mem::take(&mut current));
+                current_len = 0;
+            }
+            chunks.extend(split_into_chunks(line, max_chars, 64));
+            continue;
+        }
+        let needed = if current.is_empty() { len } else { current_len + 1 + len };
+        if needed > max_chars {
+            chunks.push(std::mem::take(&mut current));
+            current_len = 0;
+        }
+        if !current.is_empty() {
+            current.push('\n');
+            current_len += 1;
+        }
+        current.push_str(line);
+        current_len += len;
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
     chunks
 }
 
@@ -68,18 +119,26 @@ pub async fn ingest_document(
         .await
         .with_context(|| format!("Failed to read blob for document '{}' at {}", doc_filename, blob_path.display()))?;
 
-    // ── Extract text (PDF / DOCX / TXT / MD, ADR-0019) ────────────────────
-    // CPU-bound — parsing a large PDF takes seconds — so it runs off the
+    // ── Extract text (PDF / DOCX / spreadsheets / TXT / MD, ADR-0019/0020) ─
+    // CPU-bound — parsing a large PDF or workbook takes seconds — so it runs off the
     // async runtime. Its errors are permanent (not reqwest errors), so the
     // job fails at once instead of being retried (jobs.rs).
     let name = doc_filename.clone();
-    let raw_text = tokio::task::spawn_blocking(move || extract::extract_text(&raw_bytes, &name))
+    let extracted = tokio::task::spawn_blocking(move || extract::extract(&raw_bytes, &name))
         .await
         .context("text extraction task failed")??;
 
     // ── Chunk ─────────────────────────────────────────────────────────────
-    let chunks = split_into_chunks(&raw_text, 512, 64);
+    let chunks = match extracted.layout {
+        extract::Layout::Prose => split_into_chunks(&extracted.text, 512, 64),
+        extract::Layout::Rows => split_rows(&extracted.text, 512),
+    };
     let chunk_count = chunks.len();
+    anyhow::ensure!(
+        chunk_count <= MAX_CHUNKS_PER_DOCUMENT,
+        "{doc_filename} is too large to index: {chunk_count} chunks, the limit is {MAX_CHUNKS_PER_DOCUMENT} \
+         (a spreadsheet makes one chunk per row or two). Split it into several files."
+    );
 
     // ── Active embedding model ─────────────────────────────────────────────
     let model_row = sqlx::query("SELECT id, dimension FROM embedding_models WHERE is_active = true LIMIT 1")
@@ -99,10 +158,11 @@ pub async fn ingest_document(
     // memory (~2 300 × 768 f32 ≈ 7 MB for a 1 MB text file), then one short
     // transaction writes everything — still all-or-nothing per document.
     let mut embeddings = Vec::with_capacity(chunk_count);
-    for content in &chunks {
-        let embedding = llm.embed(content, crate::llm::EmbedKind::Document).await?;
-        check_dimension(&embedding, model_dimension)?;
-        embeddings.push(embedding);
+    for batch in chunks.chunks(EMBED_BATCH) {
+        for embedding in llm.embed_batch(batch, crate::llm::EmbedKind::Document).await? {
+            check_dimension(&embedding, model_dimension)?;
+            embeddings.push(embedding);
+        }
     }
 
     // ── Insert chunks + embeddings in one short transaction ───────────────
@@ -120,40 +180,58 @@ pub async fn ingest_document(
     .await?;
     anyhow::ensure!(deleted == Some(false), "document deleted during ingestion; nothing written");
 
-    for (idx, (content, embedding)) in chunks.iter().zip(embeddings).enumerate() {
+    // Bulk writes, WRITE_BATCH rows per statement. Row-by-row this was
+    // 2 statements per chunk: a 50 000-row spreadsheet spent ~11 minutes
+    // here, ~7 of them on round trips (the rest is HNSW index maintenance,
+    // measured at ~3.7 ms per vector — inherent while the index is shared).
+    for (batch_no, batch) in chunks.chunks(WRITE_BATCH).enumerate() {
+        let first = batch_no * WRITE_BATCH;
+        let indexes: Vec<i32> = (first..first + batch.len()).map(|i| i as i32).collect();
         // token_count: chars/4 heuristic (deliberate simplification — revisit
         // if it bites, per CLAUDE.md's own note on this heuristic). NOT NULL
         // on the live chunks table with no default, so it must be supplied.
-        let token_count = ((content.chars().count() / 4).max(1)) as i32;
+        let token_counts: Vec<i32> = batch.iter().map(|c| ((c.chars().count() / 4).max(1)) as i32).collect();
 
-        // Insert chunk.
-        let chunk_id: Uuid = sqlx::query_scalar(
+        let inserted: Vec<(Uuid, i32)> = sqlx::query_as(
             r#"
             INSERT INTO chunks (document_id, department_id, chunk_index, content, token_count)
-            VALUES ($1, $2, $3, $4, $5)
-            RETURNING id
-            "#
+            SELECT $1, $2, t.idx, t.content, t.tokens
+            FROM UNNEST($3::int[], $4::text[], $5::int[]) AS t(idx, content, tokens)
+            RETURNING id, chunk_index
+            "#,
         )
         .bind(document_id)
         .bind(doc_department_id)
-        .bind(idx as i32)
-        .bind(content)
-        .bind(token_count)
-        .fetch_one(&mut *tx)
+        .bind(&indexes)
+        .bind(batch)
+        .bind(&token_counts)
+        .fetch_all(&mut *tx)
         .await?;
 
-        // Insert embedding.
+        // RETURNING order is not guaranteed; line ids up by chunk_index.
+        let mut ids = vec![Uuid::nil(); batch.len()];
+        for (id, idx) in inserted {
+            ids[idx as usize - first] = id;
+        }
+        anyhow::ensure!(!ids.contains(&Uuid::nil()), "chunk insert returned fewer rows than it was given");
+
+        // All of the batch's vectors as one flat real[], sliced back into
+        // vector(dim) per row in SQL — one parameter instead of a 2-D array,
+        // which sqlx does not encode.
+        let dim = model_dimension as usize;
+        let flat: Vec<f32> = embeddings[first..first + batch.len()].iter().flatten().copied().collect();
         sqlx::query(
             r#"
-            INSERT INTO chunk_embeddings
-                (chunk_id, embedding_model_id, department_id, embedding)
-            VALUES ($1, $2, $3, $4)
-            "#
+            INSERT INTO chunk_embeddings (chunk_id, embedding_model_id, department_id, embedding)
+            SELECT ($1::uuid[])[i], $2, $3, (($4::real[])[(i - 1) * $5 + 1 : i * $5])::vector
+            FROM generate_subscripts($1::uuid[], 1) AS i
+            "#,
         )
-        .bind(chunk_id)
+        .bind(&ids)
         .bind(model_id)
         .bind(doc_department_id)
-        .bind(embedding)
+        .bind(&flat)
+        .bind(dim as i32)
         .execute(&mut *tx)
         .await?;
     }
@@ -187,6 +265,28 @@ mod tests {
         assert_eq!(chunks[0].chars().count(), 512);
         assert_eq!(&chunks[0][448..], &chunks[1][..64]);
         assert!(text.ends_with(chunks.last().unwrap().as_str()));
+    }
+
+    #[test]
+    fn split_rows_never_cuts_a_row() {
+        let row = |n: usize| format!("[лист «Л», строка {n}] Имя: Сотрудник {n}; Оклад: {}", n * 1000);
+        let text: String = (1..=200).map(row).collect::<Vec<_>>().join("\n");
+        let chunks = split_rows(&text, 512);
+        assert!(chunks.len() > 1);
+        assert!(chunks.iter().all(|c| c.chars().count() <= 512));
+        // Every row appears exactly once, whole, in order.
+        let rejoined: Vec<&str> = chunks.iter().flat_map(|c| c.lines()).collect();
+        assert_eq!(rejoined, text.lines().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn split_rows_falls_back_to_windows_for_a_huge_row() {
+        let wide = format!("[лист «Л», строка 1] {}", "Колонка: значение; ".repeat(60));
+        let text = format!("short row\n{wide}\nanother short row");
+        let chunks = split_rows(&text, 512);
+        assert_eq!(chunks.first().map(String::as_str), Some("short row"));
+        assert_eq!(chunks.last().map(String::as_str), Some("another short row"));
+        assert!(chunks.iter().all(|c| c.chars().count() <= 512));
     }
 
     #[test]

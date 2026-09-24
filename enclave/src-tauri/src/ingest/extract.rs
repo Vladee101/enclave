@@ -1,6 +1,6 @@
-//! Text extraction for ingestion (ADR-0019): plain text / Markdown, PDF with a
-//! text layer, and DOCX. Pure Rust — no native libraries to ship with the
-//! desktop app.
+//! Text extraction for ingestion (ADR-0019, ADR-0020): plain text / Markdown,
+//! PDF with a text layer, DOCX, and spreadsheets (XLSX, XLSM, XLSB, XLS, ODS).
+//! Pure Rust — no native libraries to ship with the desktop app.
 //!
 //! The format is decided from the bytes, not from the browser-reported MIME
 //! type (often empty or wrong for `.md`), with the file name as a tiebreaker
@@ -10,13 +10,37 @@
 use std::io::{Cursor, Read};
 
 use anyhow::{bail, Context, Result};
+use calamine::{Data, Reader as _};
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
 /// Extensions accepted at upload. Checked by name before anything is stored,
 /// so an unsupported file is refused immediately instead of failing later in
 /// the worker.
-pub const SUPPORTED_EXTENSIONS: &[&str] = &["pdf", "docx", "txt", "md", "markdown"];
+pub const SUPPORTED_EXTENSIONS: &[&str] =
+    &["pdf", "docx", "txt", "md", "markdown", "xlsx", "xlsm", "xlsb", "xls", "ods"];
+
+const SUPPORTED_LIST: &str = "PDF, DOCX, XLSX, XLS, ODS, TXT, MD";
+
+/// How the extracted text is laid out, which decides how it is chunked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    /// Running text: fixed-size windows with overlap.
+    Prose,
+    /// One self-describing record per line (spreadsheet rows): chunks are
+    /// packed from whole lines, so a row is never cut in two.
+    Rows,
+}
+
+#[derive(Debug)]
+pub struct Extracted {
+    pub text:   String,
+    pub layout: Layout,
+}
+
+/// How far down a sheet to look for the header row — title rows above it
+/// are common ("Отчёт за март" in A1, headers in row 3).
+const HEADER_SCAN_ROWS: usize = 10;
 
 /// DOCX main part larger than this is refused rather than inflated: a
 /// deliberately compressed archive could otherwise expand without bound.
@@ -28,23 +52,44 @@ pub fn check_supported(filename: &str) -> Result<()> {
         return Ok(());
     }
     bail!(
-        "Unsupported file type{}. Supported: PDF, DOCX, TXT, MD.",
+        "Unsupported file type{}. Supported: {SUPPORTED_LIST}.",
         if ext.is_empty() { String::new() } else { format!(" .{ext}") }
     )
 }
 
-/// Extract the text of a document. Errors are permanent (retrying will not
-/// help), and an empty result is an error: a document with no text would be
-/// "ready" and never found.
+/// Text only — see `extract`.
 pub fn extract_text(bytes: &[u8], filename: &str) -> Result<String> {
-    let text = if bytes.starts_with(b"%PDF-") {
-        extract_pdf(bytes)?
+    Ok(extract(bytes, filename)?.text)
+}
+
+/// Extract the text of a document and how it is laid out. Errors are
+/// permanent (retrying will not help), and an empty result is an error: a
+/// document with no text would be "ready" and never found.
+pub fn extract(bytes: &[u8], filename: &str) -> Result<Extracted> {
+    let ext = extension(filename);
+    let (text, layout) = if bytes.starts_with(b"%PDF-") {
+        (extract_pdf(bytes)?, Layout::Prose)
     } else if bytes.starts_with(b"PK\x03\x04") {
-        extract_docx(bytes)?
-    } else if matches!(extension(filename).as_str(), "txt" | "md" | "markdown") {
-        decode_text(bytes).with_context(|| format!("{filename} is not a text file"))?
+        // Office Open XML and OpenDocument are all ZIP archives; what is
+        // inside decides which one this is, not the name.
+        match zip_kind(bytes)? {
+            ZipKind::Word => (extract_docx(bytes)?, Layout::Prose),
+            ZipKind::Spreadsheet => (extract_spreadsheet(bytes)?, Layout::Rows),
+            ZipKind::Other => bail!(
+                "{filename} is an archive Enclave cannot read (not a Word document or a spreadsheet; .pptx is not supported)"
+            ),
+        }
+    } else if bytes.starts_with(&[0xD0, 0xCF, 0x11, 0xE0]) {
+        // Legacy OLE compound file: .xls, but also .doc / .ppt.
+        if ext == "xls" {
+            (extract_spreadsheet(bytes)?, Layout::Rows)
+        } else {
+            bail!("{filename} is a legacy Office file (.doc / .ppt) — save it as .docx or PDF");
+        }
+    } else if matches!(ext.as_str(), "txt" | "md" | "markdown") {
+        (decode_text(bytes).with_context(|| format!("{filename} is not a text file"))?, Layout::Prose)
     } else {
-        bail!("Unsupported file type for {filename}. Supported: PDF, DOCX, TXT, MD.");
+        bail!("Unsupported file type for {filename}. Supported: {SUPPORTED_LIST}.");
     };
 
     let text = normalize(&text);
@@ -57,7 +102,150 @@ pub fn extract_text(bytes: &[u8], filename: &str) -> Result<String> {
         }
         bail!("{filename} contains no text");
     }
-    Ok(text)
+    Ok(Extracted { text, layout })
+}
+
+enum ZipKind {
+    Word,
+    Spreadsheet,
+    Other,
+}
+
+fn zip_kind(bytes: &[u8]) -> Result<ZipKind> {
+    let archive = zip::ZipArchive::new(Cursor::new(bytes)).context("could not open the file (not a valid ZIP archive)")?;
+    let has = |name: &str| archive.index_for_name(name).is_some();
+    Ok(if has("word/document.xml") {
+        ZipKind::Word
+    } else if has("xl/workbook.xml") || has("xl/workbook.bin") || (has("content.xml") && has("mimetype")) {
+        ZipKind::Spreadsheet
+    } else {
+        ZipKind::Other
+    })
+}
+
+/// A spreadsheet as one self-describing line per row:
+///
+///   [лист «Зарплаты», строка 5] Имя: Иванов; Отдел: Продажи; Оклад: 120000
+///
+/// Every row carries its sheet, its row number as Excel shows it, and its
+/// column headers, so any chunk makes sense on its own: a CSV-style dump
+/// would leave the headers in the first chunk only, and "120000" in the
+/// fifth would mean nothing to either search or the model.
+///
+/// The header row is the first of the top `HEADER_SCAN_ROWS` rows with at
+/// least two non-empty cells, all of them text; rows above it (report
+/// titles) are kept as rows of their own. A sheet with no such row is
+/// labelled by column letters. Values: formulas as their cached result,
+/// dates as ISO dates, whole numbers without ".0", empty cells and error
+/// values (#N/A) skipped.
+fn extract_spreadsheet(bytes: &[u8]) -> Result<String> {
+    let mut workbook = calamine::open_workbook_auto_from_rs(Cursor::new(bytes))
+        .map_err(|e| anyhow::anyhow!("could not read the spreadsheet: {e}"))?;
+    let mut out = String::new();
+
+    for sheet in workbook.sheet_names() {
+        let range = workbook
+            .worksheet_range(&sheet)
+            .map_err(|e| anyhow::anyhow!("could not read sheet «{sheet}»: {e}"))?;
+        let Some((first_row, first_col)) = range.start() else {
+            continue; // empty sheet
+        };
+        let rows: Vec<&[Data]> = range.rows().collect();
+
+        let header_at = rows.iter().take(HEADER_SCAN_ROWS).position(|row| {
+            let filled: Vec<&Data> = row.iter().filter(|c| cell_text(c).is_some()).collect();
+            filled.len() >= 2 && filled.iter().all(|c| matches!(c, Data::String(_)))
+        });
+        let headers: Vec<String> = match header_at {
+            Some(i) => rows[i]
+                .iter()
+                .enumerate()
+                .map(|(j, c)| cell_text(c).unwrap_or_else(|| column_letter(first_col as usize + j)))
+                .collect(),
+            None => Vec::new(),
+        };
+
+        for (i, row) in rows.iter().enumerate() {
+            if Some(i) == header_at {
+                continue;
+            }
+            // Title rows above the header row are not records of it.
+            let labelled = header_at.is_some_and(|h| i > h);
+            let fields: Vec<String> = row
+                .iter()
+                .enumerate()
+                .filter_map(|(j, cell)| {
+                    let value = cell_text(cell)?;
+                    let label = if labelled { headers[j].clone() } else { column_letter(first_col as usize + j) };
+                    Some(format!("{label}: {value}"))
+                })
+                .collect();
+            if fields.is_empty() {
+                continue;
+            }
+            let row_number = first_row as usize + i + 1;
+            out.push_str(&format!("[лист «{sheet}», строка {row_number}] {}\n", fields.join("; ")));
+        }
+    }
+    Ok(out)
+}
+
+/// A cell as text, or None for empty / error cells.
+fn cell_text(cell: &Data) -> Option<String> {
+    let text = match cell {
+        Data::Empty | Data::Error(_) => return None,
+        Data::String(s) => s.split_whitespace().collect::<Vec<_>>().join(" "),
+        Data::Int(i) => i.to_string(),
+        Data::Float(f) => format_number(*f),
+        Data::Bool(b) => (if *b { "да" } else { "нет" }).to_string(),
+        Data::DateTime(dt) => {
+            if dt.is_duration() {
+                match dt.as_duration() {
+                    Some(d) => {
+                        let secs = d.num_seconds();
+                        format!("{}:{:02}:{:02}", secs / 3600, (secs / 60) % 60, secs % 60)
+                    }
+                    None => format_number(dt.as_f64()),
+                }
+            } else {
+                match dt.as_datetime() {
+                    Some(t) if t.time() == chrono::NaiveTime::MIN => t.format("%Y-%m-%d").to_string(),
+                    // Time-only cells sit on Excel's day zero.
+                    Some(t) if t.date() <= chrono::NaiveDate::from_ymd_opt(1900, 1, 1).unwrap() => {
+                        t.format("%H:%M").to_string()
+                    }
+                    Some(t) => t.format("%Y-%m-%d %H:%M").to_string(),
+                    None => format_number(dt.as_f64()),
+                }
+            }
+        }
+        Data::DateTimeIso(s) | Data::DurationIso(s) => s.clone(),
+    };
+    (!text.is_empty()).then_some(text)
+}
+
+/// 120000.0 → "120000", 0.1 + 0.2 → "0.3": at most ten decimals, trailing
+/// zeros dropped — what a person reads in the cell, not the binary float.
+fn format_number(f: f64) -> String {
+    if f.fract() == 0.0 && f.abs() < 1e15 {
+        return format!("{f:.0}");
+    }
+    let s = format!("{f:.10}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// 0 → A, 25 → Z, 26 → AA.
+fn column_letter(mut index: usize) -> String {
+    let mut letters = Vec::new();
+    loop {
+        letters.push(b'A' + (index % 26) as u8);
+        if index < 26 {
+            break;
+        }
+        index = index / 26 - 1;
+    }
+    letters.reverse();
+    String::from_utf8(letters).unwrap_or_default()
 }
 
 fn extension(filename: &str) -> String {
@@ -474,6 +662,87 @@ mod tests {
         assert_eq!(text, "Регламент отпусков\nОтпуск календарных дней: 28\nСм. портал, стр. 2\nСтаж\nДни");
     }
 
+    /// A workbook shaped like real ones: a report title above the header
+    /// row, typed cells (number, fraction, date, boolean, formula with its
+    /// cached result, error, empty), a sheet without headers, an empty sheet.
+    fn sample_workbook() -> Vec<u8> {
+        use rust_xlsxwriter::{ExcelDateTime, Format, Formula, Workbook};
+        let mut wb = Workbook::new();
+        let date = Format::new().set_num_format("dd.mm.yyyy");
+
+        let ws = wb.add_worksheet();
+        ws.set_name("Зарплаты").unwrap();
+        ws.write_string(0, 0, "Отчёт по зарплатам, март").unwrap();
+        for (col, header) in ["Имя", "Отдел", "Оклад", "Дата приёма", "Активен", "Годовой"].iter().enumerate() {
+            ws.write_string(2, col as u16, *header).unwrap();
+        }
+        ws.write_string(3, 0, "Иванов  И.И.").unwrap();
+        ws.write_string(3, 1, "Продажи").unwrap();
+        ws.write_number(3, 2, 120000.0).unwrap();
+        ws.write_datetime_with_format(3, 3, &ExcelDateTime::from_ymd(2021, 3, 15).unwrap(), &date).unwrap();
+        ws.write_boolean(3, 4, true).unwrap();
+        ws.write_formula(3, 5, Formula::new("=C4*12").set_result("1440000")).unwrap();
+        ws.write_string(4, 0, "Петрова").unwrap();
+        // B5 empty on purpose.
+        ws.write_number(4, 2, 95500.5).unwrap();
+        ws.write_boolean(4, 4, false).unwrap();
+        ws.write_formula(4, 5, Formula::new("=1/0").set_result("#DIV/0!")).unwrap();
+
+        let ws = wb.add_worksheet();
+        ws.set_name("Коды").unwrap();
+        ws.write_number(0, 0, 101.0).unwrap();
+        ws.write_number(0, 1, 0.1 + 0.2).unwrap();
+
+        let ws = wb.add_worksheet();
+        ws.set_name("Пусто").unwrap();
+
+        wb.save_to_buffer().unwrap()
+    }
+
+    #[test]
+    fn spreadsheet_rows_carry_sheet_row_and_headers() {
+        let extracted = extract(&sample_workbook(), "salaries.xlsx").unwrap();
+        assert_eq!(extracted.layout, Layout::Rows);
+        assert_eq!(
+            extracted.text,
+            [
+                "[лист «Зарплаты», строка 1] A: Отчёт по зарплатам, март",
+                "[лист «Зарплаты», строка 4] Имя: Иванов И.И.; Отдел: Продажи; Оклад: 120000; Дата приёма: 2021-03-15; Активен: да; Годовой: 1440000",
+                "[лист «Зарплаты», строка 5] Имя: Петрова; Оклад: 95500.5; Активен: нет",
+                "[лист «Коды», строка 1] A: 101; B: 0.3",
+            ]
+            .join("\n")
+        );
+    }
+
+    #[test]
+    fn spreadsheet_is_recognised_by_content_not_name() {
+        // An .xlsx renamed to .docx is still read as a spreadsheet; a
+        // workbook is never mistaken for a Word document.
+        let text = extract_text(&sample_workbook(), "misnamed.docx").unwrap();
+        assert!(text.starts_with("[лист «Зарплаты»"), "{text}");
+    }
+
+    #[test]
+    fn legacy_ole_files_other_than_xls_are_refused_with_a_hint() {
+        let err = extract_text(b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1 not really", "old.doc").unwrap_err().to_string();
+        assert!(err.contains("legacy Office file"), "{err}");
+        assert!(check_supported("book.xlsx").is_ok());
+        assert!(check_supported("old.XLS").is_ok());
+        assert!(check_supported("slides.pptx").is_err());
+    }
+
+    #[test]
+    fn column_letters_and_numbers() {
+        assert_eq!(
+            [0, 1, 25, 26, 27, 51, 52, 701, 702].map(column_letter),
+            ["A", "B", "Z", "AA", "AB", "AZ", "BA", "ZZ", "AAA"].map(String::from)
+        );
+        assert_eq!(format_number(120000.0), "120000");
+        assert_eq!(format_number(0.1 + 0.2), "0.3");
+        assert_eq!(format_number(-2.50), "-2.5");
+    }
+
     #[test]
     fn docx_paragraphs_breaks_tabs_and_entities() {
         let body = concat!(
@@ -485,16 +754,23 @@ mod tests {
     }
 
     #[test]
-    fn zip_that_is_not_a_word_document_is_refused() {
-        let mut buf = Cursor::new(Vec::new());
-        {
-            let mut zip = zip::ZipWriter::new(&mut buf);
-            zip.start_file("xl/workbook.xml", zip::write::SimpleFileOptions::default()).unwrap();
-            zip.write_all(b"<workbook/>").unwrap();
-            zip.finish().unwrap();
-        }
-        let err = extract_text(&buf.into_inner(), "sheet.docx").unwrap_err().to_string();
-        assert!(err.contains("not a Word document"), "{err}");
+    fn zips_that_are_neither_documents_nor_workbooks_are_refused() {
+        let zip_with = |part: &str| {
+            let mut buf = Cursor::new(Vec::new());
+            {
+                let mut zip = zip::ZipWriter::new(&mut buf);
+                zip.start_file(part, zip::write::SimpleFileOptions::default()).unwrap();
+                zip.write_all(b"<x/>").unwrap();
+                zip.finish().unwrap();
+            }
+            buf.into_inner()
+        };
+        // A presentation: recognised as neither, refused with the reason.
+        let err = extract_text(&zip_with("ppt/presentation.xml"), "slides.pptx").unwrap_err().to_string();
+        assert!(err.contains("cannot read") && err.contains(".pptx"), "{err}");
+        // Looks like a workbook, but is broken: the parser's error, not a panic.
+        let err = extract_text(&zip_with("xl/workbook.xml"), "broken.xlsx").unwrap_err().to_string();
+        assert!(err.contains("could not read the spreadsheet"), "{err}");
     }
 
     #[test]

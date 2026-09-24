@@ -204,7 +204,7 @@ export function DocumentsPage() {
         <div className="drop-zone-text">
           {target ? <>Drop documents here to upload to <strong>{deptLabel(target)}</strong></> : 'Choose a department above first'}
         </div>
-        <div className="drop-zone-hint">PDF, DOCX, TXT, MD — all stored locally</div>
+        <div className="drop-zone-hint">PDF, DOCX, XLSX / XLS / ODS, TXT, MD — all stored locally</div>
         <input
           id="file-input"
           aria-label="Choose files to upload"
@@ -212,7 +212,7 @@ export function DocumentsPage() {
           type="file"
           style={{ display: 'none' }}
           multiple
-          accept=".pdf,.docx,.txt,.md,.markdown"
+          accept=".pdf,.docx,.xlsx,.xlsm,.xlsb,.xls,.ods,.txt,.md,.markdown"
           onChange={e => { handleFiles(e.target.files); e.target.value = ''; }}
         />
       </div>
