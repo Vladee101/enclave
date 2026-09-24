@@ -5,6 +5,7 @@ pub mod retrieval;
 pub mod commands;
 pub mod audit;
 pub mod session;
+pub mod tables;
 
 use anyhow::Context;
 use sqlx::PgPool;

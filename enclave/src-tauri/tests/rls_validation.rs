@@ -588,7 +588,10 @@ async fn test_rls_policies() -> Result<(), Box<dyn std::error::Error>> {
             ("rewrite a job", "UPDATE ingestion_jobs SET status = 'succeeded' WHERE $1 IS NOT NULL"),
             ("rewrite the audit log", "UPDATE audit_log SET event_type = 'x' WHERE user_id = $1"),
             ("erase the audit log", "DELETE FROM audit_log WHERE user_id = $1"),
-            ("write a table created later", "INSERT INTO probe_future_table SELECT 1 WHERE $1 IS NOT NULL"),
+            ("forge a sheet table", "INSERT INTO sheet_tables (document_id, department_id, sheet, sheet_index, row_count, columns) SELECT id, department_id, 'x', 99, 0, '[]' FROM documents WHERE $1 IS NOT NULL"),
+            ("rewrite sheet rows", "UPDATE sheet_rows SET cells = '[]' WHERE $1 IS NOT NULL"),
+            ("erase sheet rows", "DELETE FROM sheet_rows WHERE $1 IS NOT NULL"),
+            ("write a table created later","INSERT INTO probe_future_table SELECT 1 WHERE $1 IS NOT NULL"),
         ] {
             let mut tx = app_pool.begin().await?;
             sqlx::query("SELECT set_config('app.current_user_id', $1, true)")

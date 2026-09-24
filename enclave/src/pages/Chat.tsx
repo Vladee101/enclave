@@ -15,11 +15,12 @@ interface Message {
   role:    'user' | 'bot';
   content: string;
   sources?: SourceRef[];
+  calculation?: string | null;
 }
 
 export function ChatPage() {
   const { user } = useAuth();
-  const { partial, sources, streaming, ask } = useLlmStream();
+  const { partial, sources, calculation, streaming, ask } = useLlmStream();
   const [messages, setMessages]   = useState<Message[]>([]);
   const [input,    setInput]      = useState('');
   const streamingId = useRef<number | null>(null);
@@ -34,9 +35,9 @@ export function ChatPage() {
   useEffect(() => {
     if (streamingId.current === null) return;
     const id = streamingId.current;
-    setMessages(prev => prev.map(m => (m.id === id ? { ...m, content: partial, sources } : m)));
+    setMessages(prev => prev.map(m => (m.id === id ? { ...m, content: partial, sources, calculation } : m)));
     scrollBottom();
-  }, [partial, sources]);
+  }, [partial, sources, calculation]);
 
   const sendMessage = useCallback(async () => {
     const q = input.trim();
@@ -104,6 +105,12 @@ export function ChatPage() {
                 </div>
               ) : (
                 <div className="message-bubble">{msg.content}</div>
+              )}
+              {msg.calculation && (
+                <details className="message-calculation">
+                  <summary>How this was calculated</summary>
+                  <pre>{msg.calculation}</pre>
+                </details>
               )}
               {msg.sources && msg.sources.length > 0 && (
                 <div className="message-sources">

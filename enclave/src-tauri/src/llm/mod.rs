@@ -168,6 +168,18 @@ pub struct LlmClient {
 }
 
 impl LlmClient {
+    /// A client for servers someone else started (the running app's) — for
+    /// the command-line examples. No adapters, and `shutdown` stops nothing.
+    pub fn connect(base_url: &str, embed_base_url: &str) -> Self {
+        Self {
+            http: Client::new(),
+            base_url: base_url.to_string(),
+            embed_base_url: Some(embed_base_url.to_string()),
+            adapter_index: Arc::default(),
+            children: Arc::default(),
+        }
+    }
+
     /// Spawn both llama-server sidecars, preload every currently-active
     /// LoRA adapter on the chat one, and wait until each is healthy. The
     /// embedding sidecar is best-effort: if it can't start (no model file
@@ -551,6 +563,10 @@ pub struct CompletionRequest {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub lora: Vec<LoraEntry>,
     pub stream: bool,
+    /// Constrains the output to JSON matching this schema — llama-server
+    /// compiles it into a sampling grammar (the table planner, ADR-0022).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub json_schema: Option<serde_json::Value>,
 }
 
 impl Default for CompletionRequest {
@@ -561,6 +577,7 @@ impl Default for CompletionRequest {
             temperature: 0.7,
             lora: vec![],
             stream: false,
+            json_schema: None,
         }
     }
 }

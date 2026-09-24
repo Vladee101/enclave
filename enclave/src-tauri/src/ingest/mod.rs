@@ -124,9 +124,14 @@ pub async fn ingest_document(
     // async runtime. Its errors are permanent (not reqwest errors), so the
     // job fails at once instead of being retried (jobs.rs).
     let name = doc_filename.clone();
-    let extracted = tokio::task::spawn_blocking(move || extract::extract(&raw_bytes, &name))
-        .await
-        .context("text extraction task failed")??;
+    let (extracted, tables) = tokio::task::spawn_blocking(move || {
+        let extracted = extract::extract(&raw_bytes, &name)?;
+        // Spreadsheets also become typed tables for calculations (ADR-0022).
+        let tables: Vec<crate::tables::TableData> = extracted.sheets.iter().map(crate::tables::build_table).collect();
+        anyhow::Ok((extracted, tables))
+    })
+    .await
+    .context("text extraction task failed")??;
 
     // ── Chunk ─────────────────────────────────────────────────────────────
     let chunks = match extracted.layout {
@@ -235,6 +240,10 @@ pub async fn ingest_document(
         .execute(&mut *tx)
         .await?;
     }
+
+    // The same sheets as typed tables — same transaction, so the document
+    // is ready with its chunks and its tables or with neither.
+    crate::tables::write_tables(&mut tx, document_id, doc_department_id, &tables).await?;
 
     // Mark document ready.
     sqlx::query("UPDATE documents SET status = 'ready', updated_at = now() WHERE id = $1")

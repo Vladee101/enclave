@@ -12,6 +12,8 @@ interface SourceRef {
 interface QueryResult {
   answer:  string;
   sources: SourceRef[];
+  /** Set when the answer is a calculation over a spreadsheet (ADR-0022). */
+  calculation: string | null;
 }
 
 interface StreamTokenEvent {
@@ -27,6 +29,7 @@ interface StreamTokenEvent {
 export function useLlmStream() {
   const [partial,   setPartial]   = useState('');
   const [sources,   setSources]   = useState<SourceRef[]>([]);
+  const [calculation, setCalculation] = useState<string | null>(null);
   const [streaming, setStreaming] = useState(false);
   const [error,     setError]     = useState<string | null>(null);
   const unlisten = useRef<UnlistenFn | null>(null);
@@ -41,6 +44,7 @@ export function useLlmStream() {
     cancel();
     setPartial('');
     setSources([]);
+    setCalculation(null);
     setError(null);
     setStreaming(true);
 
@@ -58,6 +62,7 @@ export function useLlmStream() {
       });
 
       setSources(result.sources);
+      setCalculation(result.calculation);
       // Reconcile to the authoritative final answer in case streamed
       // tokens and the buffered result diverge (e.g. trailing whitespace).
       setPartial(result.answer);
@@ -72,5 +77,5 @@ export function useLlmStream() {
     }
   }, [cancel]);
 
-  return { partial, sources, streaming, error, ask, cancel };
+  return { partial, sources, calculation, streaming, error, ask, cancel };
 }

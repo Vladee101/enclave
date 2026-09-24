@@ -36,6 +36,37 @@ pub enum Layout {
 pub struct Extracted {
     pub text:   String,
     pub layout: Layout,
+    /// Spreadsheets only: every sheet as typed rows, for calculations over
+    /// the table (ADR-0022). Empty for documents.
+    pub sheets: Vec<Sheet>,
+}
+
+/// A typed cell value — what the cell holds, not how it is displayed.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CellValue {
+    Number(f64),
+    /// ISO: `2021-03-15`, or `2021-03-15 09:30` with a time of day.
+    Date(String),
+    Text(String),
+}
+
+/// One sheet as a table: its records (rows below the header row, or every
+/// row when there is none) and a name for each column.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Sheet {
+    pub name:    String,
+    /// Column names: header cells, column letters where there is no header.
+    /// Unique within the sheet ("Сумма", "Сумма (2)").
+    pub columns: Vec<String>,
+    pub rows:    Vec<SheetRow>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SheetRow {
+    /// Row number as Excel shows it.
+    pub number: usize,
+    /// One entry per column; None for empty and error cells.
+    pub cells:  Vec<Option<CellValue>>,
 }
 
 /// How far down a sheet to look for the header row — title rows above it
@@ -67,6 +98,7 @@ pub fn extract_text(bytes: &[u8], filename: &str) -> Result<String> {
 /// document with no text would be "ready" and never found.
 pub fn extract(bytes: &[u8], filename: &str) -> Result<Extracted> {
     let ext = extension(filename);
+    let mut sheets = Vec::new();
     let (text, layout) = if bytes.starts_with(b"%PDF-") {
         (extract_pdf(bytes)?, Layout::Prose)
     } else if bytes.starts_with(b"PK\x03\x04") {
@@ -74,7 +106,11 @@ pub fn extract(bytes: &[u8], filename: &str) -> Result<Extracted> {
         // inside decides which one this is, not the name.
         match zip_kind(bytes)? {
             ZipKind::Word => (extract_docx(bytes)?, Layout::Prose),
-            ZipKind::Spreadsheet => (extract_spreadsheet(bytes)?, Layout::Rows),
+            ZipKind::Spreadsheet => {
+                let (text, parsed) = extract_spreadsheet(bytes)?;
+                sheets = parsed;
+                (text, Layout::Rows)
+            }
             ZipKind::Other => bail!(
                 "{filename} is an archive Enclave cannot read (not a Word document or a spreadsheet; .pptx is not supported)"
             ),
@@ -82,7 +118,9 @@ pub fn extract(bytes: &[u8], filename: &str) -> Result<Extracted> {
     } else if bytes.starts_with(&[0xD0, 0xCF, 0x11, 0xE0]) {
         // Legacy OLE compound file: .xls, but also .doc / .ppt.
         if ext == "xls" {
-            (extract_spreadsheet(bytes)?, Layout::Rows)
+            let (text, parsed) = extract_spreadsheet(bytes)?;
+            sheets = parsed;
+            (text, Layout::Rows)
         } else {
             bail!("{filename} is a legacy Office file (.doc / .ppt) — save it as .docx or PDF");
         }
@@ -102,7 +140,7 @@ pub fn extract(bytes: &[u8], filename: &str) -> Result<Extracted> {
         }
         bail!("{filename} contains no text");
     }
-    Ok(Extracted { text, layout })
+    Ok(Extracted { text, layout, sheets })
 }
 
 enum ZipKind {
@@ -138,10 +176,14 @@ fn zip_kind(bytes: &[u8]) -> Result<ZipKind> {
 /// labelled by column letters. Values: formulas as their cached result,
 /// dates as ISO dates, whole numbers without ".0", empty cells and error
 /// values (#N/A) skipped.
-fn extract_spreadsheet(bytes: &[u8]) -> Result<String> {
+///
+/// Alongside the text, each sheet as a typed table (`Sheet`): the same
+/// records, cell values instead of display strings (ADR-0022).
+fn extract_spreadsheet(bytes: &[u8]) -> Result<(String, Vec<Sheet>)> {
     let mut workbook = calamine::open_workbook_auto_from_rs(Cursor::new(bytes))
         .map_err(|e| anyhow::anyhow!("could not read the spreadsheet: {e}"))?;
     let mut out = String::new();
+    let mut sheets = Vec::new();
 
     for sheet in workbook.sheet_names() {
         let range = workbook
@@ -164,6 +206,15 @@ fn extract_spreadsheet(bytes: &[u8]) -> Result<String> {
                 .collect(),
             None => Vec::new(),
         };
+        let mut table = Sheet {
+            name:    sheet.clone(),
+            columns: unique_names(
+                (0..range.width())
+                    .map(|j| headers.get(j).cloned().unwrap_or_else(|| column_letter(first_col as usize + j)))
+                    .collect(),
+            ),
+            rows:    Vec::new(),
+        };
 
         for (i, row) in rows.iter().enumerate() {
             if Some(i) == header_at {
@@ -185,9 +236,64 @@ fn extract_spreadsheet(bytes: &[u8]) -> Result<String> {
             }
             let row_number = first_row as usize + i + 1;
             out.push_str(&format!("[лист «{sheet}», строка {row_number}] {}\n", fields.join("; ")));
+            // Title rows above the header are not records of the table.
+            if header_at.is_none() || labelled {
+                table.rows.push(SheetRow { number: row_number, cells: row.iter().map(cell_value).collect() });
+            }
+        }
+        if !table.rows.is_empty() {
+            sheets.push(table);
         }
     }
-    Ok(out)
+    Ok((out, sheets))
+}
+
+/// Duplicate column names get a suffix — "Сумма", "Сумма (2)" — so a
+/// calculation can name a column unambiguously.
+fn unique_names(names: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    names
+        .into_iter()
+        .map(|name| {
+            let mut candidate = name.clone();
+            let mut n = 2;
+            while !seen.insert(candidate.clone()) {
+                candidate = format!("{name} ({n})");
+                n += 1;
+            }
+            candidate
+        })
+        .collect()
+}
+
+/// A cell as a typed value, or None for empty / error cells. Numbers and
+/// dates keep their type; everything else is its display text.
+fn cell_value(cell: &Data) -> Option<CellValue> {
+    match cell {
+        Data::Int(i) => Some(CellValue::Number(*i as f64)),
+        Data::Float(f) if f.is_finite() => Some(CellValue::Number(*f)),
+        Data::DateTime(dt) if !dt.is_duration() => match dt.as_datetime() {
+            // Time-only cells sit on Excel's day zero: not dates.
+            Some(t) if t.date() <= chrono::NaiveDate::from_ymd_opt(1900, 1, 1).unwrap() => {
+                cell_text(cell).map(CellValue::Text)
+            }
+            Some(_) => cell_text(cell).map(CellValue::Date),
+            None => cell_text(cell).map(CellValue::Text),
+        },
+        Data::DateTimeIso(s) if is_iso_date(s) => Some(CellValue::Date(s.replacen('T', " ", 1))),
+        _ => cell_text(cell).map(CellValue::Text),
+    }
+}
+
+/// Starts with YYYY-MM-DD.
+pub(crate) fn is_iso_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() >= 10
+        && b[..4].iter().all(u8::is_ascii_digit)
+        && b[4] == b'-'
+        && b[5..7].iter().all(u8::is_ascii_digit)
+        && b[7] == b'-'
+        && b[8..10].iter().all(u8::is_ascii_digit)
 }
 
 /// A cell as text, or None for empty / error cells.
@@ -226,7 +332,7 @@ fn cell_text(cell: &Data) -> Option<String> {
 
 /// 120000.0 → "120000", 0.1 + 0.2 → "0.3": at most ten decimals, trailing
 /// zeros dropped — what a person reads in the cell, not the binary float.
-fn format_number(f: f64) -> String {
+pub(crate) fn format_number(f: f64) -> String {
     if f.fract() == 0.0 && f.abs() < 1e15 {
         return format!("{f:.0}");
     }
@@ -713,6 +819,33 @@ mod tests {
             ]
             .join("\n")
         );
+    }
+
+    #[test]
+    fn spreadsheet_sheets_are_typed_tables_without_title_rows() {
+        use CellValue::*;
+        let sheets = extract(&sample_workbook(), "salaries.xlsx").unwrap().sheets;
+        // The empty sheet has no table; the title row is not a record.
+        assert_eq!(sheets.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["Зарплаты", "Коды"]);
+        let salaries = &sheets[0];
+        assert_eq!(salaries.columns, ["Имя", "Отдел", "Оклад", "Дата приёма", "Активен", "Годовой"]);
+        assert_eq!(salaries.rows.iter().map(|r| r.number).collect::<Vec<_>>(), [4, 5]);
+        assert_eq!(
+            salaries.rows[0].cells,
+            [
+                Some(Text("Иванов И.И.".into())),
+                Some(Text("Продажи".into())),
+                Some(Number(120000.0)),
+                Some(Date("2021-03-15".into())),
+                Some(Text("да".into())),
+                Some(Number(1440000.0)),
+            ]
+        );
+        assert_eq!(salaries.rows[1].cells[1], None);
+        assert_eq!(salaries.rows[1].cells[5], None, "an error value is an empty cell");
+        // No header row: columns are letters.
+        assert_eq!(sheets[1].columns, ["A", "B"]);
+        assert_eq!(unique_names(vec!["Сумма".into(), "Сумма".into(), "Сумма (2)".into()]), ["Сумма", "Сумма (2)", "Сумма (2) (2)"]);
     }
 
     #[test]

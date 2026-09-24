@@ -6,7 +6,7 @@
 ## What this file is
 
 A build brief for the coding agent. **The source of truth for *why* is
-`docs/adr/`** — eighteen accepted Architecture Decision Records (0001–0010, 0015–0021; 0011 superseded by 0021). This file says *what
+`docs/adr/`** — nineteen accepted Architecture Decision Records (0001–0010, 0015–0022; 0011 superseded by 0021). This file says *what
 to build, in what order, and which invariants must never be broken.* When a
 decision here seems arbitrary, the matching ADR explains it. Do not contradict
 an ADR; if reality forces a change, write a new ADR that supersedes the old one
@@ -84,6 +84,17 @@ department's content — enforced in the database, not the app (ADR-0008).
     A new write through `app_pool` needs an explicit GRANT in the migration
     that introduces it — default privileges no longer hand out writes, and
     `rls_validation` section 9 fails if a forbidden write comes back.
+
+11. **Table calculations compile a validated plan, never model-written SQL**
+    (ADR-0022). The planner's output is data: it is constrained by a JSON
+    schema built from the table's own columns, checked against the catalog
+    (`tables::plan::parse_plan`), and compiled into an aggregate whose SQL
+    text comes only from fixed fragments — column positions and values are
+    bind parameters. It runs on `app_pool` inside the caller's
+    identity-scoped transaction, so RLS decides the rows. `sheet_tables` /
+    `sheet_rows` are written only by the ingestion worker (department_id
+    stamped as for chunks) and purged with their document by trigger. A plan
+    that fails falls back to retrieval, never to an approximate number.
 
 ## Build tasks (in order)
 
