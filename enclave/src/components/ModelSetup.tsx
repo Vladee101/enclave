@@ -16,7 +16,8 @@ interface Done     { ok: boolean; error: string | null; }
 const gb = (bytes: number) => (bytes / 1e9).toFixed(2) + ' GB';
 
 /**
- * First-run model setup (ADR-0024): shown until both models are installed.
+ * First-run setup (ADR-0024, ADR-0025): shown until both models and the
+ * inference engine for this machine are installed.
  * Downloads them from their official repositories (resumable, checked
  * against pinned SHA-256), or takes a file the user already has — for an
  * offline machine. The app restarts to load them.
@@ -111,9 +112,9 @@ export function ModelSetup() {
           ) : (
             <>
               <p>
-                Answers and search run on two local models. They are downloaded once
-                ({gb(total)}) from their official repositories and checked; after that
-                nothing leaves this machine.
+                Answers and search run on two local models and the llama.cpp engine built
+                for this machine&apos;s graphics. They are downloaded once ({gb(total)}) from
+                their official repositories and checked; after that nothing leaves this machine.
               </p>
               {pending.map(m => {
                 const done = progress[m.key] ?? m.partial;
@@ -130,7 +131,7 @@ export function ModelSetup() {
                     {m.state === 'unverified' && (
                       <div className="model-setup-note">A file is there but was not installed by Enclave; it will be replaced.</div>
                     )}
-                    {!running && (
+                    {!running && !m.key.startsWith('engine') && (
                       <div className="model-setup-import">
                         <input
                           className="input"

@@ -1,4 +1,5 @@
-//! Model weights, fetched on first run (ADR-0024).
+//! Model weights, fetched on first run (ADR-0024); the inference engine
+//! beside them is `engine.rs`.
 //!
 //! The installer carries no weights (2.8 GB); the app downloads them once
 //! from the models' official repositories, or takes files the user already
@@ -66,11 +67,11 @@ struct Installed {
     source: String,
 }
 
-/// Per-model state for the frontend.
+/// Per-item state for the frontend (a model file or an engine archive).
 #[derive(Serialize, Debug)]
 pub struct ModelStatus {
     pub key:        &'static str,
-    pub label:      &'static str,
+    pub label:      String,
     /// "ready", "missing", or "unverified" (a file is there, but nothing
     /// recorded it — e.g. copied in by hand before this existed).
     pub state:      &'static str,
@@ -81,7 +82,7 @@ pub struct ModelStatus {
 
 /// Progress of one file, sent as `models-progress`.
 #[derive(Serialize, Clone)]
-struct Progress {
+pub(crate) struct Progress {
     key:        &'static str,
     downloaded: u64,
     total:      u64,
@@ -123,7 +124,15 @@ fn record(dir: &Path, file_name: &str, installed: Installed) -> Result<()> {
     Ok(())
 }
 
+/// Everything the first run needs: both models, then the inference
+/// engine for this machine (`engine.rs`).
 pub fn status(app: &AppHandle) -> Result<Vec<ModelStatus>> {
+    let mut all = model_status(app)?;
+    all.extend(super::engine::status(app)?);
+    Ok(all)
+}
+
+fn model_status(app: &AppHandle) -> Result<Vec<ModelStatus>> {
     let dir = models_dir(app)?;
     let manifest = read_manifest(&dir);
     Ok(MODELS
@@ -139,14 +148,9 @@ pub fn status(app: &AppHandle) -> Result<Vec<ModelStatus>> {
                 (None, _) => "missing",
             };
             let partial = std::fs::metadata(dir.join(format!("{}.part", m.file_name))).map(|md| md.len()).unwrap_or(0);
-            ModelStatus { key: m.key, label: m.label, state, size: m.size, partial }
+            ModelStatus { key: m.key, label: m.label.to_string(), state, size: m.size, partial }
         })
         .collect())
-}
-
-/// True when every model is installed and recorded.
-pub fn all_ready(app: &AppHandle) -> bool {
-    status(app).map(|s| s.iter().all(|m| m.state == "ready")).unwrap_or(false)
 }
 
 /// Download whatever is not ready, one file after another, reporting
@@ -156,7 +160,7 @@ pub async fn download_missing(app: AppHandle) {
     let result = async {
         let dir = models_dir(&app)?;
         std::fs::create_dir_all(&dir)?;
-        let states = status(&app)?;
+        let states = model_status(&app)?;
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(30))
             .build()?;
@@ -165,6 +169,7 @@ pub async fn download_missing(app: AppHandle) {
                 download_one(&app, &http, &dir, m).await.with_context(|| m.label)?;
             }
         }
+        super::engine::download_missing(&app, &http).await?;
         anyhow::Ok(())
     }
     .await;
@@ -180,7 +185,7 @@ pub async fn download_missing(app: AppHandle) {
 
 /// SHA-256 of what is already in a partial file, so a resumed download
 /// still hashes the whole file.
-fn hash_existing(path: &Path) -> Result<(Sha256, u64)> {
+pub(crate) fn hash_existing(path: &Path) -> Result<(Sha256, u64)> {
     let mut hasher = Sha256::new();
     let mut total = 0u64;
     if let Ok(mut f) = std::fs::File::open(path) {
@@ -197,23 +202,67 @@ fn hash_existing(path: &Path) -> Result<(Sha256, u64)> {
     Ok((hasher, total))
 }
 
-async fn download_one(app: &AppHandle, http: &reqwest::Client, dir: &Path, m: &ModelFile) -> Result<()> {
-    let part = dir.join(format!("{}.part", m.file_name));
+/// Pauses before retrying a download that failed on the network.
+const RETRY_DELAYS: [Duration; 3] = [Duration::from_secs(2), Duration::from_secs(5), Duration::from_secs(10)];
+
+/// Download `url` into `part`, resuming what is already there, and check
+/// the whole file against `size` and `sha256`. On a hash mismatch the
+/// partial file is removed (resuming it cannot fix it). Progress goes out
+/// as `models-progress` under `key`. Shared by model files and the engine
+/// archives (`engine.rs`).
+///
+/// Network failures are retried, each attempt resuming where the last one
+/// stopped: through a local proxy the first connection timed out now and
+/// then (both first attempts on the development machine), and a user
+/// should not have to know that clicking again helps.
+pub(crate) async fn fetch_verified(
+    app: &AppHandle,
+    http: &reqwest::Client,
+    key: &'static str,
+    url: &str,
+    sha256: &str,
+    size: u64,
+    part: &Path,
+) -> Result<()> {
+    let mut delays = RETRY_DELAYS.iter();
+    loop {
+        match fetch_once(app, http, key, url, sha256, size, part).await {
+            Err(e) if e.chain().any(|c| c.is::<reqwest::Error>()) => match delays.next() {
+                Some(delay) => {
+                    warn!("Download of {url} interrupted ({e:#}); retrying in {} s", delay.as_secs());
+                    tokio::time::sleep(*delay).await;
+                }
+                None => return Err(e),
+            },
+            result => return result,
+        }
+    }
+}
+
+async fn fetch_once(
+    app: &AppHandle,
+    http: &reqwest::Client,
+    key: &'static str,
+    url: &str,
+    sha256: &str,
+    size: u64,
+    part: &Path,
+) -> Result<()> {
     let (hasher, mut have) = {
-        let part = part.clone();
+        let part = part.to_path_buf();
         tauri::async_runtime::spawn_blocking(move || hash_existing(&part)).await??
     };
     let mut hasher = hasher;
-    if have > m.size {
-        // Not a prefix of this file (a different model was pinned before).
-        std::fs::remove_file(&part)?;
+    if have > size {
+        // Not a prefix of this file (something else was pinned before).
+        std::fs::remove_file(part)?;
         hasher = Sha256::new();
         have = 0;
     }
-    info!("Downloading {} ({} of {} bytes already here)", m.url, have, m.size);
+    info!("Downloading {url} ({have} of {size} bytes already here)");
 
-    if have < m.size {
-        let mut request = http.get(m.url);
+    if have < size {
+        let mut request = http.get(url);
         if have > 0 {
             request = request.header(reqwest::header::RANGE, format!("bytes={have}-"));
         }
@@ -223,9 +272,9 @@ async fn download_one(app: &AppHandle, http: &reqwest::Client, dir: &Path, m: &M
             // the whole file to its own beginning.
             have = 0;
             hasher = Sha256::new();
-            std::fs::remove_file(&part)?;
+            std::fs::remove_file(part)?;
         }
-        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&part)?;
+        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(part)?;
         let mut stream = response.bytes_stream();
         let mut last_event = Instant::now();
         while let Some(chunk) = stream.next().await {
@@ -233,31 +282,36 @@ async fn download_one(app: &AppHandle, http: &reqwest::Client, dir: &Path, m: &M
             file.write_all(&chunk)?;
             hasher.update(&chunk);
             have += chunk.len() as u64;
-            if have > m.size {
-                bail!("the server sent more than the expected {} bytes", m.size);
+            if have > size {
+                bail!("the server sent more than the expected {size} bytes");
             }
             if last_event.elapsed() > Duration::from_millis(250) {
-                let _ = app.emit("models-progress", Progress { key: m.key, downloaded: have, total: m.size });
+                let _ = app.emit("models-progress", Progress { key, downloaded: have, total: size });
                 last_event = Instant::now();
             }
         }
         file.flush()?;
     }
-    let _ = app.emit("models-progress", Progress { key: m.key, downloaded: have, total: m.size });
+    let _ = app.emit("models-progress", Progress { key, downloaded: have, total: size });
 
-    anyhow::ensure!(have == m.size, "download ended at {have} of {} bytes — start it again to resume", m.size);
+    anyhow::ensure!(have == size, "download ended at {have} of {size} bytes — start it again to resume");
     let digest = format!("{:x}", hasher.finalize());
-    if digest != m.sha256 {
-        // Resuming a corrupt file cannot fix it.
-        let _ = std::fs::remove_file(&part);
-        bail!("checksum mismatch (got {digest}, expected {}); the partial file was removed", m.sha256);
+    if digest != sha256 {
+        let _ = std::fs::remove_file(part);
+        bail!("checksum mismatch (got {digest}, expected {sha256}); the partial file was removed");
     }
+    Ok(())
+}
+
+async fn download_one(app: &AppHandle, http: &reqwest::Client, dir: &Path, m: &ModelFile) -> Result<()> {
+    let part = dir.join(format!("{}.part", m.file_name));
+    fetch_verified(app, http, m.key, m.url, m.sha256, m.size, &part).await?;
     let target = dir.join(m.file_name);
     // A file from before (unverified, or another model) is replaced; a hard
     // link to someone else's copy (Ollama's) is only unlinked, not changed.
     let _ = std::fs::remove_file(&target);
     std::fs::rename(&part, &target)?;
-    record(dir, m.file_name, Installed { size: m.size, sha256: digest, source: "download".into() })?;
+    record(dir, m.file_name, Installed { size: m.size, sha256: m.sha256.to_string(), source: "download".into() })?;
     info!("{} installed as {}", m.label, target.display());
     Ok(())
 }

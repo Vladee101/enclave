@@ -15,6 +15,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 pub mod adapters;
+pub mod engine;
 pub mod models;
 
 /// Name of the embedding model row this sidecar registers in
@@ -56,15 +57,19 @@ fn model_path(app: &AppHandle, file_name: &str) -> Result<String> {
 /// `externalBin` copies only the exe into `target/`, which then starts and
 /// finds nothing — so the exe is run in place, from this directory.
 ///
-/// Resolution: `ENCLAVE_LLAMA_DIR`, then `{resource_dir}/llama` (installed
-/// app; to be bundled like the embedded PostgreSQL, ADR-0014), then
-/// `src-tauri/binaries/llama` in debug builds, where `fetch-sidecar.ps1`
+/// Resolution: `ENCLAVE_LLAMA_DIR`, then the build downloaded for this
+/// machine on first run (`engine.rs`, ADR-0025), then `{resource_dir}/llama`,
+/// then `src-tauri/binaries/llama` in debug builds, where `fetch-sidecar.ps1`
 /// unpacks the release.
 fn llama_server_exe(app: &AppHandle) -> Result<PathBuf> {
     let exe_name = if cfg!(windows) { "llama-server.exe" } else { "llama-server" };
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(dir) = std::env::var_os("ENCLAVE_LLAMA_DIR") {
         candidates.push(PathBuf::from(dir));
+    }
+    // The build downloaded for this machine on first run (ADR-0025).
+    if let Some(dir) = engine::installed_dir(app) {
+        candidates.push(dir);
     }
     if let Ok(dir) = app.path().resource_dir() {
         candidates.push(dir.join("llama"));
@@ -149,7 +154,7 @@ impl EmbedKind {
 /// Managed as Tauri state after `LlmClient::spawn()`.
 ///
 /// Two separate llama-server processes run, not one: `base_url` (port 8080)
-/// serves the resident chat/completion model (Qwen 2.5 3B) plus LoRA
+/// serves the resident chat/completion model (Qwen3-4B, ADR-0024) plus LoRA
 /// adapters, and `embed_base_url` (port 8081, `Option` because it's fine for
 /// chat to work without it) serves a *separate* small embedding model. They
 /// must be separate because `chunk_embeddings.embedding` is a fixed
