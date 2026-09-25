@@ -72,7 +72,7 @@ fn llama_server_exe(app: &AppHandle) -> Result<PathBuf> {
         candidates.push(dir);
     }
     if let Ok(dir) = app.path().resource_dir() {
-        candidates.push(dir.join("llama"));
+        candidates.push(crate::db::embedded::plain_path(dir).join("llama"));
     }
     if cfg!(debug_assertions) {
         candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries").join("llama"));

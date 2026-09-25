@@ -79,7 +79,7 @@ fn pg_dir(app: &AppHandle) -> Result<PathBuf> {
         candidates.push(PathBuf::from(dir));
     }
     if let Ok(dir) = app.path().resource_dir() {
-        candidates.push(dir.join("pg"));
+        candidates.push(plain_path(dir).join("pg"));
     }
     if cfg!(debug_assertions) {
         candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries").join("pg"));
@@ -123,6 +123,18 @@ fn run_tool(mut cmd: Command, what: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// `\\?\C:\…` → `C:\…`. In a release build Tauri's resource directory
+/// comes in this verbatim form, and PostgreSQL checks itself at start by
+/// running `"<its own path>" -V` through cmd, which cannot run a verbatim
+/// path: "could not locate matching postgres executable" (observed on the
+/// first release build). UNC shares (`\\?\UNC\…`) are left as they are.
+pub fn plain_path(path: PathBuf) -> PathBuf {
+    match path.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        Some(rest) if !rest.starts_with("UNC\\") => PathBuf::from(rest),
+        _ => path,
+    }
 }
 
 /// A port nobody listens on right now. Chosen per start, not fixed: a fixed
@@ -378,6 +390,13 @@ async fn wait_ready(child: &mut Child, port: u16, superuser_url: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verbatim_paths_are_made_plain_but_unc_shares_are_not() {
+        assert_eq!(plain_path(PathBuf::from(r"\\?\C:\Program Files\Enclave")), PathBuf::from(r"C:\Program Files\Enclave"));
+        assert_eq!(plain_path(PathBuf::from(r"C:\Enclave")), PathBuf::from(r"C:\Enclave"));
+        assert_eq!(plain_path(PathBuf::from(r"\\?\UNC\server\share")), PathBuf::from(r"\\?\UNC\server\share"));
+    }
 
     #[test]
     fn passwords_are_long_random_and_url_safe() {
