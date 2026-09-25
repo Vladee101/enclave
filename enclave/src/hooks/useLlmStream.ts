@@ -62,7 +62,7 @@ export function useLlmStream() {
     setStreaming(false);
   }, []);
 
-  const ask = useCallback(async (query: string, topK = 5, plan?: ChosenPlan) => {
+  const ask = useCallback(async (query: string, topK = 5, plan?: ChosenPlan, documentIds?: string[]) => {
     cancel();
     setPartial('');
     setSources([]);
@@ -81,7 +81,9 @@ export function useLlmStream() {
 
       const result = await invoke<QueryResult>('cmd_query_stream', {
         requestId,
-        args: { query, top_k: topK, plan: plan ?? null }, // identity comes from the core session
+        // Identity comes from the core session; document_ids narrows the
+        // search to the files chosen in the panel (RLS still decides).
+        args: { query, top_k: topK, plan: plan ?? null, document_ids: documentIds?.length ? documentIds : null },
       });
 
       setSources(result.sources);

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 
-interface DocInfo {
+export interface DocInfo {
   id:       string;
   filename: string;
   status:   'pending' | 'ready' | 'failed';
@@ -32,13 +32,25 @@ function fileIcon(name: string): string {
   return '📄';
 }
 
+interface Props {
+  /** Put text into the question at the cursor (a clicked column name). */
+  onInsert: (text: string) => void;
+  /** Ids of the documents the question is limited to. */
+  selected: string[];
+  /** Click on a document: add it to, or take it out of, the selection. */
+  onToggleSelect: (doc: DocInfo) => void;
+  /** The list as loaded, so that deleted documents leave the selection. */
+  onLoaded?: (docs: DocInfo[]) => void;
+}
+
 /**
  * The user's documents beside the chat (their departments', under RLS), and
- * for spreadsheets the columns of each sheet. Clicking a column puts its
- * name into the question: asked in the table's own words, a calculation
+ * for spreadsheets the columns of each sheet. Clicking a document limits the
+ * next question to it (and any others chosen); clicking a column puts its
+ * name into the question — asked in the table's own words, a calculation
  * needs no clarification (ADR-0023). Names and types only — no cell values.
  */
-export function DocumentsPanel({ onInsert }: { onInsert: (text: string) => void }) {
+export function DocumentsPanel({ onInsert, selected, onToggleSelect, onLoaded }: Props) {
   const [docs,     setDocs]     = useState<DocInfo[]>([]);
   const [tables,   setTables]   = useState<TableOutline[]>([]);
   const [filter,   setFilter]   = useState('');
@@ -56,12 +68,13 @@ export function DocumentsPanel({ onInsert }: { onInsert: (text: string) => void 
       ]);
       setDocs(d);
       setTables(t);
+      onLoaded?.(d);
     } catch (e) {
       setError(String(e));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [onLoaded]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -101,19 +114,36 @@ export function DocumentsPanel({ onInsert }: { onInsert: (text: string) => void 
           const sheets = sheetsOf[d.id] ?? [];
           const expandable = sheets.length > 0;
           const isOpen = !!open[d.id];
+          const isSelected = selected.includes(d.id);
+          const selectable = d.status === 'ready';
           return (
             <li key={d.id}>
-              <button
-                type="button"
-                className={`docs-panel-doc${expandable ? ' expandable' : ''}`}
-                onClick={() => expandable && toggle(d.id)}
-                title={d.filename}
-              >
-                <span className="docs-panel-chevron">{expandable ? (isOpen ? '▾' : '▸') : ''}</span>
-                <span>{fileIcon(d.filename)}</span>
-                <span className="docs-panel-name">{d.filename}</span>
-                {d.status !== 'ready' && <span className={`docs-panel-status ${d.status}`}>{d.status}</span>}
-              </button>
+              <div className={`docs-panel-doc${isSelected ? ' selected' : ''}`}>
+                <button
+                  type="button"
+                  className="docs-panel-chevron"
+                  onClick={() => expandable && toggle(d.id)}
+                  disabled={!expandable}
+                  aria-label={isOpen ? 'Hide columns' : 'Show columns'}
+                  title={expandable ? (isOpen ? 'Hide columns' : 'Show columns') : undefined}
+                >
+                  {expandable ? (isOpen ? '▾' : '▸') : ''}
+                </button>
+                <button
+                  type="button"
+                  className="docs-panel-pick"
+                  onClick={() => selectable && onToggleSelect(d)}
+                  disabled={!selectable}
+                  title={selectable
+                    ? (isSelected ? `Stop limiting the question to ${d.filename}` : `Ask only in ${d.filename}`)
+                    : d.filename}
+                >
+                  <span>{fileIcon(d.filename)}</span>
+                  <span className="docs-panel-name">{d.filename}</span>
+                  {isSelected && <span className="docs-panel-check">✓</span>}
+                  {d.status !== 'ready' && <span className={`docs-panel-status ${d.status}`}>{d.status}</span>}
+                </button>
+              </div>
               {expandable && isOpen && (
                 <div className="docs-panel-sheets">
                   {sheets.map(s => (

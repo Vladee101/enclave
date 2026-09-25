@@ -2,7 +2,7 @@ import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { useLlmStream, type ChosenPlan, type Clarification } from '../hooks/useLlmStream';
 import { Spinner } from '../components/Spinner';
-import { DocumentsPanel } from '../components/DocumentsPanel';
+import { DocumentsPanel, type DocInfo } from '../components/DocumentsPanel';
 
 interface SourceRef {
   document_id: string;
@@ -20,7 +20,11 @@ interface Message {
   clarification?: Clarification | null;
   /** The question a bot message answers — asked again with a chosen plan. */
   question?: string;
+  /** The documents a question was limited to, shown under it. */
+  scope?: ScopeDoc[];
 }
+
+type ScopeDoc = Pick<DocInfo, 'id' | 'filename'>;
 
 export function ChatPage() {
   const { user } = useAuth();
@@ -31,6 +35,16 @@ export function ChatPage() {
   const nextId   = useRef(1);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef  = useRef<HTMLTextAreaElement>(null);
+
+  // Documents the next question is limited to (clicked in the panel).
+  const [scope, setScope] = useState<ScopeDoc[]>([]);
+  const toggleScope = useCallback((doc: DocInfo) => setScope(prev =>
+    prev.some(d => d.id === doc.id) ? prev.filter(d => d.id !== doc.id) : [...prev, { id: doc.id, filename: doc.filename }]
+  ), []);
+  // A document deleted or no longer ready leaves the selection.
+  const pruneScope = useCallback((docs: DocInfo[]) => setScope(prev =>
+    prev.filter(s => docs.some(d => d.id === s.id && d.status === 'ready'))
+  ), []);
 
   // Panel open/closed is a per-viewer convenience; storage may be
   // unavailable, and then the panel simply starts open.
@@ -78,17 +92,17 @@ export function ChatPage() {
 
   // `shown` is what appears as the user's message: the question, or the
   // label of the option picked in a clarification.
-  const run = useCallback(async (q: string, shown: string, plan?: ChosenPlan) => {
+  const run = useCallback(async (q: string, shown: string, plan?: ChosenPlan, limitTo: ScopeDoc[] = []) => {
     if (streaming || !user) return;
 
-    const userMsg: Message = { id: nextId.current++, role: 'user', content: shown };
+    const userMsg: Message = { id: nextId.current++, role: 'user', content: shown, scope: limitTo };
     const botId = nextId.current++;
     streamingId.current = botId;
-    setMessages(prev => [...prev, userMsg, { id: botId, role: 'bot', content: '', question: q }]);
+    setMessages(prev => [...prev, userMsg, { id: botId, role: 'bot', content: '', question: q, scope: limitTo }]);
     setTimeout(scrollBottom, 50);
 
     try {
-      await ask(q, 5, plan);
+      await ask(q, 5, plan, limitTo.map(d => d.id));
     } catch (e) {
       setMessages(prev => prev.map(m => (
         m.id === botId ? { ...m, content: `⚠️ Error: ${String(e)}` } : m
@@ -103,8 +117,8 @@ export function ChatPage() {
     const q = input.trim();
     if (!q) return;
     setInput('');
-    run(q, q);
-  }, [input, run]);
+    run(q, q, undefined, scope);
+  }, [input, run, scope]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -115,7 +129,14 @@ export function ChatPage() {
 
   return (
     <div className="chat-page">
-    {panelOpen && <DocumentsPanel onInsert={insertAtCursor} />}
+    {panelOpen && (
+      <DocumentsPanel
+        onInsert={insertAtCursor}
+        selected={scope.map(d => d.id)}
+        onToggleSelect={toggleScope}
+        onLoaded={pruneScope}
+      />
+    )}
     <button
       type="button"
       className="docs-panel-toggle"
@@ -161,6 +182,9 @@ export function ChatPage() {
               ) : (
                 <div className="message-bubble">{msg.content}</div>
               )}
+              {msg.role === 'user' && msg.scope && msg.scope.length > 0 && (
+                <div className="message-scope">in {msg.scope.map(d => d.filename).join(', ')}</div>
+              )}
               {msg.clarification && msg.question && (
                 <div className="message-clarify">
                   {msg.clarification.options.map((o, i) => (
@@ -169,7 +193,7 @@ export function ChatPage() {
                       type="button"
                       className="clarify-option"
                       disabled={streaming}
-                      onClick={() => run(msg.question!, o.label, { table_id: msg.clarification!.table_id, plan: o.plan })}
+                      onClick={() => run(msg.question!, o.label, { table_id: msg.clarification!.table_id, plan: o.plan }, msg.scope)}
                     >
                       {o.label}
                     </button>
@@ -199,6 +223,18 @@ export function ChatPage() {
       </div>
 
       {/* ── Input bar ── */}
+      {scope.length > 0 && (
+        <div className="chat-scope">
+          <span className="chat-scope-label">Ask only in:</span>
+          {scope.map(d => (
+            <span key={d.id} className="chat-scope-chip">
+              {d.filename}
+              <button type="button" onClick={() => setScope(prev => prev.filter(s => s.id !== d.id))} aria-label={`Remove ${d.filename}`}>×</button>
+            </span>
+          ))}
+          <button type="button" className="chat-scope-clear" onClick={() => setScope([])}>clear</button>
+        </div>
+      )}
       <div className="chat-input-bar">
         <textarea
           ref={inputRef}

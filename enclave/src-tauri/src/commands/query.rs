@@ -22,6 +22,17 @@ pub struct QueryArgs {
     /// checked against the table as this user sees it.
     #[serde(default)]
     pub plan:    Option<ChosenPlan>,
+    /// Documents chosen in the chat panel: search and calculations look
+    /// only at these. None or empty — everything the user can see. Ids the
+    /// user cannot see find nothing (RLS), they are not an error.
+    #[serde(default)]
+    pub document_ids: Option<Vec<Uuid>>,
+}
+
+impl QueryArgs {
+    fn scope(&self) -> Option<&[Uuid]> {
+        self.document_ids.as_deref().filter(|ids| !ids.is_empty())
+    }
 }
 
 #[derive(Deserialize)]
@@ -101,10 +112,13 @@ pub async fn prepare(
     let mut tx = pool.begin().await.map_err(db)?;
     set_current_user(&mut tx, user_id).await.map_err(e)?;
 
-    let chunks = retrieval::retrieve(&mut tx, &query_embedding, &args.query, top_k).await.map_err(e)?;
+    let scope = args.scope();
+    let chunks = retrieval::retrieve(&mut tx, &query_embedding, &args.query, top_k, scope).await.map_err(e)?;
     let lora = adapters_for_user(&mut tx, llm, user_id).await.map_err(e)?;
-    let document_ids: Vec<Uuid> = chunks.iter().map(|c| c.document_id).collect();
-    let candidates = plan::load_candidates(&mut tx, &document_ids).await.map_err(e)?;
+    // Tables to plan over: those of the chosen documents, in the order
+    // chosen; otherwise those retrieval ranked first.
+    let retrieved: Vec<Uuid> = chunks.iter().map(|c| c.document_id).collect();
+    let candidates = plan::load_candidates(&mut tx, scope.unwrap_or(&retrieved)).await.map_err(e)?;
 
     let computation = if candidates.is_empty() {
         audit_retrieval(&mut tx, user_id, &chunks, top_k).await.map_err(e)?;

@@ -113,7 +113,7 @@ async fn rare_identifier_beats_words_every_row_shares() -> Result<(), Box<dyn st
 
     let mut tx = app.begin().await?;
     set_current_user(&mut tx, member).await?;
-    let found = retrieval::retrieve(&mut tx, &query_vector, question, 5).await?;
+    let found = retrieval::retrieve(&mut tx, &query_vector, question, 5, None).await?;
     tx.rollback().await?;
     assert!(
         found.iter().any(|c| c.content.contains("Д-001234;")),
@@ -125,9 +125,75 @@ async fn rare_identifier_beats_words_every_row_shares() -> Result<(), Box<dyn st
     // nothing — the rarity counts are taken under RLS too.
     let mut tx = app.begin().await?;
     set_current_user(&mut tx, outsider).await?;
-    let foreign = retrieval::retrieve(&mut tx, &query_vector, question, 5).await?;
+    let foreign = retrieval::retrieve(&mut tx, &query_vector, question, 5, None).await?;
     tx.rollback().await?;
     assert!(foreign.is_empty(), "an outsider must retrieve nothing, got {} chunks", foreign.len());
+
+    // Chosen documents (the chat panel). A second document in the same
+    // department, and one in the outsider's.
+    let memo: Uuid = sqlx::query_scalar(
+        "INSERT INTO documents (department_id, title, file_hash, mime_type, byte_size, status, uploaded_by) \
+         VALUES ($1, 'Памятка.txt', 'm', 'text/plain', 1, 'ready', $2) RETURNING id",
+    )
+    .bind(dept)
+    .bind(member)
+    .fetch_one(&admin)
+    .await?;
+    let foreign_doc: Uuid = sqlx::query_scalar(
+        "INSERT INTO documents (department_id, title, file_hash, mime_type, byte_size, status, uploaded_by) \
+         VALUES ($1, 'Чужое.txt', 'f', 'text/plain', 1, 'ready', $2) RETURNING id",
+    )
+    .bind(other_dept)
+    .bind(outsider)
+    .fetch_one(&admin)
+    .await?;
+    for (doc_id, dept_id, text) in [
+        (memo, dept, "Памятка: сумма договора указывается в рублях, ответственный назначается приказом."),
+        (foreign_doc, other_dept, "Чужой отдел: сумма договора Д-001234 секретна."),
+    ] {
+        sqlx::query(
+            r#"
+            WITH c AS (
+                INSERT INTO chunks (document_id, department_id, chunk_index, content, token_count)
+                VALUES ($1, $2, 0, $3, 20) RETURNING id
+            )
+            INSERT INTO chunk_embeddings (chunk_id, embedding_model_id, department_id, embedding)
+            SELECT id, $4, $2, array_fill(0.5::real, ARRAY[768])::vector FROM c
+            "#,
+        )
+        .bind(doc_id)
+        .bind(dept_id)
+        .bind(text)
+        .bind(model)
+        .execute(&admin)
+        .await?;
+    }
+
+    let scoped = |ids: Vec<Uuid>| {
+        let app = app.clone();
+        let query_vector = query_vector.clone();
+        async move {
+            let mut tx = app.begin().await?;
+            set_current_user(&mut tx, member).await?;
+            let found = retrieval::retrieve(&mut tx, &query_vector, question, 5, Some(&ids)).await?;
+            tx.rollback().await?;
+            Ok::<_, Box<dyn std::error::Error>>(found)
+        }
+    };
+
+    // The registry chosen: the row is found, and nothing from elsewhere.
+    let found = scoped(vec![doc]).await?;
+    assert!(found.iter().any(|c| c.content.contains("Д-001234;")));
+    assert!(found.iter().all(|c| c.document_id == doc));
+
+    // Only the memo chosen: its one chunk, and none of the registry's
+    // 1 500 rows, though they match the question far better.
+    let found = scoped(vec![memo]).await?;
+    assert_eq!(found.iter().map(|c| c.document_id).collect::<Vec<_>>(), [memo]);
+
+    // Another department's document by id: RLS, nothing.
+    let found = scoped(vec![foreign_doc]).await?;
+    assert!(found.is_empty(), "a chosen foreign document must find nothing, got {}", found.len());
 
     Ok(())
 }

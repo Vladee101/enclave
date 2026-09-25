@@ -46,7 +46,14 @@ const COMMON_DF: i64 = 1000;
 /// one of the 50 000 candidates (1.2–1.4 s); now candidates are the few rows
 /// holding a rare word. OR rather than plainto_tsquery's AND throughout: an
 /// AND over a natural-language question matched nothing (ADR-0006 note).
-async fn lexical_leg(conn: &mut PgConnection, query_text: &str, limit: i64) -> Result<Vec<sqlx::postgres::PgRow>> {
+///
+/// `scope`: only these documents (rarity is then counted within them too).
+async fn lexical_leg(
+    conn: &mut PgConnection,
+    query_text: &str,
+    limit: i64,
+    scope: Option<&[Uuid]>,
+) -> Result<Vec<sqlx::postgres::PgRow>> {
     let word_df: Vec<(String, i64)> = sqlx::query_as(
         r#"
         SELECT q.lex,
@@ -57,6 +64,7 @@ async fn lexical_leg(conn: &mut PgConnection, query_text: &str, limit: i64) -> R
                     WHERE c.content_tsv @@ quote_literal(q.lex)::tsquery
                       AND d.status = 'ready'
                       AND d.deleted_at IS NULL
+                      AND ($3::uuid[] IS NULL OR c.document_id = ANY ($3::uuid[]))
                     LIMIT $2
                 ) s) AS df
         FROM unnest(tsvector_to_array(to_tsvector('english', $1))) AS q(lex)
@@ -64,6 +72,7 @@ async fn lexical_leg(conn: &mut PgConnection, query_text: &str, limit: i64) -> R
     )
     .bind(query_text)
     .bind(COMMON_DF)
+    .bind(scope)
     .fetch_all(&mut *conn)
     .await?;
 
@@ -87,12 +96,14 @@ async fn lexical_leg(conn: &mut PgConnection, query_text: &str, limit: i64) -> R
             WHERE c.content_tsv @@ q.tsq
               AND d.status = 'ready'
               AND d.deleted_at IS NULL
+              AND ($3::uuid[] IS NULL OR c.document_id = ANY ($3::uuid[]))
             ORDER BY ts_rank_cd(c.content_tsv, q.tsq) DESC
             LIMIT $2
             "#,
         )
         .bind(&all_words)
         .bind(limit)
+        .bind(scope)
         .fetch_all(&mut *conn)
         .await?);
     }
@@ -114,6 +125,7 @@ async fn lexical_leg(conn: &mut PgConnection, query_text: &str, limit: i64) -> R
         WHERE c.content_tsv @@ q.rare
           AND d.status = 'ready'
           AND d.deleted_at IS NULL
+          AND ($5::uuid[] IS NULL OR c.document_id = ANY ($5::uuid[]))
         ORDER BY (SELECT sum(w.idf) FROM w WHERE c.content_tsv @@ w.tsq) DESC,
                  ts_rank_cd(c.content_tsv, q.every) DESC
         LIMIT $4
@@ -123,6 +135,50 @@ async fn lexical_leg(conn: &mut PgConnection, query_text: &str, limit: i64) -> R
     .bind(&weights)
     .bind(&all_words)
     .bind(limit)
+    .bind(scope)
+    .fetch_all(&mut *conn)
+    .await?)
+}
+
+// ─── Dense leg over chosen documents ─────────────────────────────────────────
+
+/// Nearest chunks of the chosen documents.
+///
+/// A plain HNSW scan collects its nearest candidates across the whole index
+/// first (`hnsw.ef_search`, 40) and filters after, so for one document among
+/// many it can return nothing. pgvector's iterative scan (0.8+) keeps
+/// scanning until enough rows pass the filter; `strict_order` keeps them in
+/// true distance order, which RRF ranks by. The planner still chooses: for
+/// a small document it goes through `idx_chunks_document_id` and sorts
+/// exactly (measured 1.7 ms, 27 chunks among 50 000), for a 50 000-row one
+/// through HNSW (6 ms; an exact scan of it took 1.4 s). The setting is
+/// transaction-local and this transaction is the question's own.
+async fn dense_leg_scoped(
+    conn: &mut PgConnection,
+    query_embedding: &[f32],
+    limit: i64,
+    documents: &[Uuid],
+) -> Result<Vec<sqlx::postgres::PgRow>> {
+    sqlx::query("SET LOCAL hnsw.iterative_scan = strict_order").execute(&mut *conn).await?;
+    Ok(sqlx::query(
+        r#"
+        SELECT c.id AS chunk_id, c.document_id, d.title AS filename, c.content
+        FROM chunk_embeddings ce
+        JOIN chunks    c ON c.id = ce.chunk_id
+        JOIN documents d ON d.id = c.document_id
+        WHERE c.document_id = ANY ($3::uuid[])
+          AND d.status = 'ready'
+          AND d.deleted_at IS NULL
+          AND ce.embedding_model_id = (
+                SELECT id FROM embedding_models WHERE is_active = true LIMIT 1
+              )
+        ORDER BY ce.embedding <=> $1::vector
+        LIMIT $2
+        "#,
+    )
+    .bind(query_embedding)
+    .bind(limit)
+    .bind(documents)
     .fetch_all(&mut *conn)
     .await?)
 }
@@ -135,44 +191,52 @@ async fn lexical_leg(conn: &mut PgConnection, query_text: &str, limit: i64) -> R
 /// inside the same transaction that set `app.current_user_id` — required for
 /// RLS to apply (CLAUDE.md invariant #2); a fresh pool connection would not
 /// see that transaction-local session variable.
+///
+/// `scope`: search only these documents (the ones chosen in the chat
+/// panel); None searches everything the user can see. Either way RLS
+/// decides what exists — a chosen id from another department finds nothing.
 pub async fn retrieve(
     conn: &mut PgConnection,
     query_embedding: &[f32],
     query_text: &str,
     top_k: usize,
+    scope: Option<&[Uuid]>,
 ) -> Result<Vec<RetrievedChunk>> {
     let k = top_k as i64;
 
     // ── Dense leg (pgvector cosine ANN) ──────────────────────────────────
-    let dense_rows = sqlx::query(
-        r#"
-        SELECT
-            c.id        AS chunk_id,
-            c.document_id,
-            d.title     AS filename,
-            c.content
-        FROM chunk_embeddings ce
-        JOIN chunks    c ON c.id = ce.chunk_id
-        JOIN documents d ON d.id = c.document_id
-        WHERE d.status = 'ready'
-          AND d.deleted_at IS NULL
-          -- Only vectors from the model that embedded the query: cosine
-          -- between vectors of two different models is meaningless, and
-          -- ADR-0007 keeps old-model rows around during re-embedding.
-          AND ce.embedding_model_id = (
-                SELECT id FROM embedding_models WHERE is_active = true LIMIT 1
-              )
-        ORDER BY ce.embedding <=> $1::vector
-        LIMIT $2
-        "#
-    )
-    .bind(query_embedding)
-    .bind(k * 2)
-    .fetch_all(&mut *conn)
-    .await?;
+    let dense_rows = match scope {
+        Some(documents) => dense_leg_scoped(conn, query_embedding, k * 2, documents).await?,
+        None => sqlx::query(
+            r#"
+            SELECT
+                c.id        AS chunk_id,
+                c.document_id,
+                d.title     AS filename,
+                c.content
+            FROM chunk_embeddings ce
+            JOIN chunks    c ON c.id = ce.chunk_id
+            JOIN documents d ON d.id = c.document_id
+            WHERE d.status = 'ready'
+              AND d.deleted_at IS NULL
+              -- Only vectors from the model that embedded the query: cosine
+              -- between vectors of two different models is meaningless, and
+              -- ADR-0007 keeps old-model rows around during re-embedding.
+              AND ce.embedding_model_id = (
+                    SELECT id FROM embedding_models WHERE is_active = true LIMIT 1
+                  )
+            ORDER BY ce.embedding <=> $1::vector
+            LIMIT $2
+            "#
+        )
+        .bind(query_embedding)
+        .bind(k * 2)
+        .fetch_all(&mut *conn)
+        .await?,
+    };
 
     // ── Lexical leg (tsvector FTS) ────────────────────────────────────────
-    let lex_rows = lexical_leg(conn, query_text, k * 2).await?;
+    let lex_rows = lexical_leg(conn, query_text, k * 2, scope).await?;
 
     // ── RRF fusion ────────────────────────────────────────────────────────
     let dense_ids: Vec<Uuid> = dense_rows.iter().map(|r| r.get::<Uuid, &str>("chunk_id")).collect();

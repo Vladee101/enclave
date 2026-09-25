@@ -2,14 +2,15 @@
 //! go into the prompt — for "why wasn't X found?" and "what did it compute?"
 //! without the UI.
 //!
-//!   APP_DATABASE_URL=… cargo run --example retrieve -- <username> "<question>" [top_k] [--answer] [--pick N]
+//!   APP_DATABASE_URL=… cargo run --example retrieve -- <username> "<question>" [top_k] [--answer] [--pick N] [--in <document id>]…
 //!
 //! Needs the app's servers running (chat on 8080, embeddings on 8081).
 //! Calls `commands::query::prepare` — the function cmd_query uses — so the
 //! path is the app's: embed, retrieve under RLS, and for spreadsheets the
 //! planner and the table calculation (ADR-0022). When the app would ask the
 //! user back, the options are printed; --pick N answers with option N, as
-//! clicking its button does. --answer also runs the completion. No LoRA
+//! clicking its button does. --in limits the question to a document, as
+//! choosing it in the chat panel does (repeatable). --answer also runs the completion. No LoRA
 //! adapters: the example's client loads none.
 
 use enclave_lib::{
@@ -27,9 +28,18 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|i| raw.get(i + 1))
         .map(|n| n.parse())
         .transpose()?;
-    let mut args = raw.iter().enumerate().filter(|(i, a)| {
-        *a != "--answer" && *a != "--pick" && !(*i > 0 && raw[i - 1] == "--pick")
-    }).map(|(_, a)| a.clone());
+    let scope: Vec<uuid::Uuid> = raw
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i > 0 && raw[i - 1] == "--in")
+        .map(|(_, id)| id.parse())
+        .collect::<Result<_, _>>()?;
+    let takes_value = |i: usize| i > 0 && (raw[i - 1] == "--pick" || raw[i - 1] == "--in");
+    let mut args = raw
+        .iter()
+        .enumerate()
+        .filter(|(i, a)| !a.starts_with("--") && !takes_value(*i))
+        .map(|(_, a)| a.clone());
     let usage = "usage: retrieve <username> \"<question>\" [top_k] [--answer] [--pick N]";
     let username = args.next().ok_or_else(|| anyhow::anyhow!(usage))?;
     let question = args.next().ok_or_else(|| anyhow::anyhow!(usage))?;
@@ -42,7 +52,12 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     let llm = LlmClient::connect("http://127.0.0.1:8080", "http://127.0.0.1:8081");
-    let mut query = QueryArgs { query: question.clone(), top_k: Some(top_k), plan: None };
+    let mut query = QueryArgs {
+        query: question.clone(),
+        top_k: Some(top_k),
+        plan: None,
+        document_ids: (!scope.is_empty()).then(|| scope.clone()),
+    };
     let started = std::time::Instant::now();
     let mut prepared = prepare(&pool, &llm, user_id, &query).await.map_err(|e| anyhow::anyhow!(e))?;
 

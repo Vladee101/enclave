@@ -380,9 +380,29 @@ html, body, #root {
   cursor: default;
 }
 
-.docs-panel-doc.expandable { cursor: pointer; }
-.docs-panel-doc.expandable:hover,
+.docs-panel-doc { padding: 0; gap: 0; }
+.docs-panel-doc.selected { background: var(--accent-subtle); box-shadow: inset 2px 0 0 var(--accent-primary); }
 .docs-panel-column:hover { background: var(--accent-subtle); }
+
+.docs-panel-pick {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  padding: 5px 6px 5px 2px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.docs-panel-pick:hover:not(:disabled) { color: var(--text-accent); }
+.docs-panel-pick:disabled { cursor: default; color: var(--text-muted); }
+
+.docs-panel-check { color: var(--text-accent); font-size: 12px; flex-shrink: 0; }
 
 .docs-panel-column {
   cursor: pointer;
@@ -392,7 +412,19 @@ html, body, #root {
 }
 .docs-panel-column:hover { color: var(--text-accent); }
 
-.docs-panel-chevron { width: 10px; color: var(--text-muted); flex-shrink: 0; }
+.docs-panel-chevron {
+  width: 20px;
+  align-self: stretch;
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0;
+}
+.docs-panel-chevron:hover:not(:disabled) { color: var(--text-accent); }
+.docs-panel-chevron:disabled { cursor: default; }
 
 .docs-panel-name {
   overflow: hidden;
@@ -533,6 +565,51 @@ html, body, #root {
 }
 
 .source-chip:hover { border-color: var(--accent-border); color: var(--text-accent); }
+
+.message-scope {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  text-align: right;
+}
+
+.chat-scope {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 28px 0;
+  font-size: 12px;
+}
+
+.chat-scope-label { color: var(--text-secondary); }
+
+.chat-scope-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 2px 10px;
+  border-radius: 20px;
+  background: var(--accent-subtle);
+  border: 1px solid var(--accent-border);
+  color: var(--text-accent);
+  max-width: 240px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.chat-scope-chip button,
+.chat-scope-clear {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+  padding: 0 4px;
+}
+.chat-scope-chip button:hover,
+.chat-scope-clear:hover { color: var(--text-accent); }
 
 .message-clarify {
   display: flex;
