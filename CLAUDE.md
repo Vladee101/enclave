@@ -6,7 +6,7 @@
 ## What this file is
 
 A build brief for the coding agent. **The source of truth for *why* is
-`docs/adr/`** — twenty accepted Architecture Decision Records (0001–0010, 0015–0023; 0011 superseded by 0021). This file says *what
+`docs/adr/`** — twenty-one accepted Architecture Decision Records (0001–0010, 0014–0023; 0011 superseded by 0021). This file says *what
 to build, in what order, and which invariants must never be broken.* When a
 decision here seems arbitrary, the matching ADR explains it. Do not contradict
 an ADR; if reality forces a change, write a new ADR that supersedes the old one
@@ -172,7 +172,10 @@ implementation.
   role and what that obligates (department_id stamping). Extends ADR-0008.
 - **0013 — Content-addressed blob storage.** The `{blob_root}/{file_hash}` store
   and the dedup it enables.
-- **0014 — PostgreSQL distribution.** Resolve the packaging question above.
+- ~~**0014 — PostgreSQL distribution.**~~ Decided (ADR-0014): the app ships a
+  trimmed PostgreSQL 18 + self-built pgvector (61 MB) and runs it itself —
+  `postgres.exe` spawned without a console, 127.0.0.1 on a free port,
+  generated passwords. Implementation pending.
 - (Also note, not necessarily an ADR) the `token_count` chars/4 heuristic is a
   deliberate simplification, commented in-line; revisit if it bites. Ingestion
   retries are no longer a simplification: transient (HTTP) failures are
