@@ -55,6 +55,7 @@ pub fn run() {
             app.manage(llm_client);
             app.manage(embedded_pg);
             app.manage(session::Session::default());
+            app.manage(commands::models::ModelDownloads::default());
 
             let app2 = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -87,6 +88,10 @@ pub fn run() {
             commands::admin::cmd_list_audit,
             commands::admin::cmd_list_adapters,
             commands::admin::cmd_add_adapter,
+            commands::models::cmd_models_status,
+            commands::models::cmd_download_models,
+            commands::models::cmd_import_model,
+            commands::models::cmd_restart_app,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

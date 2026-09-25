@@ -109,6 +109,23 @@ if ($LASTEXITCODE -ne 0) { Write-Error "pgvector build failed (nmake exit $LASTE
 Copy-Item (Join-Path $pgroot "lib\vector.dll") (Join-Path $OutDir "lib")
 Get-ChildItem (Join-Path $pgroot "share\extension") -Filter "vector*" | Copy-Item -Destination (Join-Path $OutDir "share\extension")
 
+# --- Visual C++ runtime -----------------------------------------------------
+# postgres.exe and its DLLs need VCRUNTIME140/140_1 and MSVCP140 (the UCRT
+# part ships with Windows 10+). A machine without the Visual C++
+# Redistributable would not start the server, so the runtime is deployed
+# app-locally next to postgres.exe, as Microsoft permits for these files.
+# The newest runtime runs binaries built by older compilers.
+$crt = Get-ChildItem (Join-Path $vsPath "VC\Redist\MSVC") -Directory |
+    Where-Object { $_.Name -match '^\d+(\.\d+)+$' } |      # not v145 and the like
+    Sort-Object { [version]$_.Name } -Descending |
+    ForEach-Object { Get-ChildItem (Join-Path $_.FullName "x64") -Directory -Filter "Microsoft.VC*.CRT" -ErrorAction SilentlyContinue } |
+    Select-Object -First 1
+if (-not $crt) { Write-Error "No Visual C++ redistributable runtime under $vsPath\VC\Redist\MSVC." }
+foreach ($f in "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll") {
+    Copy-Item (Join-Path $crt.FullName $f) (Join-Path $OutDir "bin")
+}
+Write-Host "Visual C++ runtime: $($crt.FullName)"
+
 # --- licenses ---------------------------------------------------------------
 $lic = Join-Path $OutDir "licenses"
 New-Item -ItemType Directory -Path $lic | Out-Null

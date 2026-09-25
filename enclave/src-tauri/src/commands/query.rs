@@ -99,9 +99,16 @@ pub async fn prepare(
     user_id: Uuid,
     args:    &QueryArgs,
 ) -> Result<Prepared, String> {
-    if let Some(chosen) = &args.plan {
-        return prepare_chosen(pool, llm, user_id, args, chosen).await;
-    }
+    // A chosen plan is either a calculation, or "answer from the documents"
+    // ({"answerable": false}, offered in every clarification): then the
+    // planner is not asked again.
+    let text_only = match &args.plan {
+        Some(chosen) if chosen.plan.get("answerable") != Some(&serde_json::Value::Bool(false)) => {
+            return prepare_chosen(pool, llm, user_id, args, chosen).await;
+        }
+        Some(_) => true,
+        None => false,
+    };
 
     let top_k = args.top_k.unwrap_or(5);
     let e = |e: anyhow::Error| e.to_string();
@@ -118,7 +125,11 @@ pub async fn prepare(
     // Tables to plan over: those of the chosen documents, in the order
     // chosen; otherwise those retrieval ranked first.
     let retrieved: Vec<Uuid> = chunks.iter().map(|c| c.document_id).collect();
-    let candidates = plan::load_candidates(&mut tx, scope.unwrap_or(&retrieved)).await.map_err(e)?;
+    let candidates = if text_only {
+        Vec::new()
+    } else {
+        plan::load_candidates(&mut tx, scope.unwrap_or(&retrieved)).await.map_err(e)?
+    };
 
     let computation = if candidates.is_empty() {
         audit_retrieval(&mut tx, user_id, &chunks, top_k).await.map_err(e)?;
@@ -235,6 +246,40 @@ async fn prepare_chosen(
     let plan = plan::parse_plan(&chosen.plan.to_string(), &candidates)
         .map_err(e)?
         .ok_or_else(|| "The chosen option is not a calculation.".to_string())?;
+
+    // Checked again, minus what the user already settled: a second problem
+    // must not hide behind the first (ADR-0023).
+    let confirmed: Vec<String> = chosen
+        .plan
+        .get("confirmed")
+        .and_then(|c| serde_json::from_value(c.clone()).ok())
+        .unwrap_or_default();
+    if let Some(clarification) = plan::clarification_after(&plan, &candidates, &args.query, &confirmed) {
+        audit::record(
+            &mut tx,
+            Some(user_id),
+            None,
+            event::QUERY,
+            serde_json::json!({
+                "document_ids": [candidates[0].document_id],
+                "chunk_ids": [],
+                "table_id": clarification.table_id,
+                "clarification": true,
+                "top_k": top_k,
+            }),
+        )
+        .await
+        .map_err(e)?;
+        tx.commit().await.map_err(db)?;
+        return Ok(Prepared {
+            prompt: String::new(),
+            answer: Some(clarification.question.clone()),
+            lora,
+            sources: Vec::new(),
+            calculation: None,
+            clarification: Some(clarification),
+        });
+    }
     let computation = plan::execute(&mut tx, &candidates, plan).await.map_err(e)?;
     audit_computation(&mut tx, user_id, &computation, top_k).await.map_err(e)?;
     tx.commit().await.map_err(db)?;

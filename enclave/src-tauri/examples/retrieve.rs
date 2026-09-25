@@ -9,7 +9,7 @@
 //! path is the app's: embed, retrieve under RLS, and for spreadsheets the
 //! planner and the table calculation (ADR-0022). When the app would ask the
 //! user back, the options are printed; --pick N answers with option N, as
-//! clicking its button does. --in limits the question to a document, as
+//! clicking its button does; repeat it for a chain of clarifications. --in limits the question to a document, as
 //! choosing it in the chat panel does (repeatable). --answer also runs the completion. No LoRA
 //! adapters: the example's client loads none.
 
@@ -22,12 +22,14 @@ use enclave_lib::{
 async fn main() -> anyhow::Result<()> {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let answer = raw.iter().any(|a| a == "--answer");
-    let pick: Option<usize> = raw
+    // One --pick per clarification, in order: a chosen option is checked
+    // again and may ask the next question.
+    let picks: Vec<usize> = raw
         .iter()
-        .position(|a| a == "--pick")
-        .and_then(|i| raw.get(i + 1))
-        .map(|n| n.parse())
-        .transpose()?;
+        .enumerate()
+        .filter(|(i, _)| *i > 0 && raw[i - 1] == "--pick")
+        .map(|(_, n)| n.parse())
+        .collect::<Result<_, _>>()?;
     let scope: Vec<uuid::Uuid> = raw
         .iter()
         .enumerate()
@@ -61,12 +63,13 @@ async fn main() -> anyhow::Result<()> {
     let started = std::time::Instant::now();
     let mut prepared = prepare(&pool, &llm, user_id, &query).await.map_err(|e| anyhow::anyhow!(e))?;
 
-    if let Some(c) = &prepared.clarification {
+    let mut picks = picks.into_iter();
+    while let Some(c) = &prepared.clarification {
         println!("CLARIFICATION: {}", c.question);
         for (i, o) in c.options.iter().enumerate() {
             println!("  [{}] {}", i + 1, o.label);
         }
-        let Some(n) = pick else { return Ok(()) };
+        let Some(n) = picks.next() else { return Ok(()) };
         let option = c.options.get(n.wrapping_sub(1)).ok_or_else(|| anyhow::anyhow!("no option {n}"))?;
         println!("picked [{n}] {}", option.label);
         query.plan = Some(ChosenPlan { table_id: c.table_id, plan: option.plan.clone() });

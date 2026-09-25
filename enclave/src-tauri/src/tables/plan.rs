@@ -697,41 +697,89 @@ impl Plan {
     }
 }
 
-/// Whether the plan rests on a column the question never names — then the
-/// user chooses instead of the model guessing. Checked: the grouping column
-/// (dates grouped by a period excepted: "по годам" has one reading), and
-/// the metric's column when the table has more than one it could be.
-/// Deterministic, in the core: a small model cannot be relied on to notice
-/// its own guess.
+/// The question names `phrase` word for word: every word of three or more
+/// letters, with the same allowance for endings as `mentions`. Stricter,
+/// for the check below — "Номер договора" is not named by a question that
+/// says "договоров" (every question here does), only by one that says
+/// "номер договора".
+fn names_all(question_words: &[String], phrase: &str) -> bool {
+    let significant: Vec<String> = words(phrase).into_iter().filter(|w| w.chars().count() >= 3).collect();
+    !significant.is_empty()
+        && significant.iter().all(|w| {
+            let len = w.chars().count();
+            let stem: String = if len > 4 { w.chars().take((len - 2).max(4)).collect() } else { w.clone() };
+            question_words.iter().any(|q| q.starts_with(&stem))
+        })
+}
+
+/// "Answer from the documents instead": the plan the core reads as "no
+/// calculation" (ADR-0023) — offered in every clarification, since the
+/// question may not be a calculation at all.
+fn text_only() -> ClarifyOption {
+    ClarifyOption { label: "Искать в документах".into(), plan: json!({ "answerable": false }) }
+}
+
+/// Whether the plan rests on a guess, or ignores part of the question —
+/// then the user chooses instead of the model. Deterministic, in the core:
+/// a small model cannot be relied on to notice either. Checked, in order:
+///
+/// 1. the grouping column is not named (dates grouped by a period
+///    excepted: "по годам" has one reading);
+/// 2. the metric's column is not named, and the table has others of its
+///    type;
+/// 3. the question names a value of a column the plan does not filter or
+///    group by — "расторгнутых" with no condition on «Статус» (Qwen3-4B
+///    dropped exactly that condition, ADR-0024);
+/// 4. the question names a column, word for word, that the plan does not
+///    use at all — "предметом" with a plain row count (Qwen3-4B planned a
+///    calculation for "что является предметом договоров").
+///
+/// A chosen option comes back checked again (`clarification_after`), so a
+/// second problem is not hidden behind the first. Every option records the
+/// check it answers in its plan's `confirmed` list — "Не учитывать" must
+/// not bring the same question back.
 pub fn clarification(plan: &Plan, candidates: &[Candidate], question: &str) -> Option<Clarification> {
+    clarification_after(plan, candidates, question, &[])
+}
+
+/// `clarification` for a plan the user chose: checks listed in `confirmed`
+/// are settled and skipped.
+pub fn clarification_after(plan: &Plan, candidates: &[Candidate], question: &str, confirmed: &[String]) -> Option<Clarification> {
     let candidate = candidates.get(plan.table)?;
     let columns = &candidate.columns;
     let q = words(question);
     let named = |i: usize| {
         mentions(&q, &columns[i].name) || columns[i].top.iter().any(|(value, _)| mentions(&q, value))
     };
-    let option = |label: String, plan: Plan| ClarifyOption { label, plan: plan.to_json(candidate) };
+    let settled = |key: &str| confirmed.iter().any(|c| c == key);
+    let option = |label: String, plan: Plan, key: &str| {
+        let mut json = plan.to_json(candidate);
+        let mut done = confirmed.to_vec();
+        done.push(key.to_string());
+        json["confirmed"] = json!(done);
+        ClarifyOption { label, plan: json }
+    };
+    let ask = |question: String, mut options: Vec<ClarifyOption>| {
+        options.push(text_only());
+        Some(Clarification { question, table_id: candidate.table_id, options })
+    };
+    let groupable = |i: usize| {
+        let c = &columns[i];
+        c.kind == ColumnType::Text && c.distinct >= 2 && c.distinct <= MAX_GROUPABLE_DISTINCT
+    };
 
     if let Some((col, None)) = plan.group_by {
-        if !named(col) {
-            let groupable = |i: usize| {
-                let c = &columns[i];
-                c.kind == ColumnType::Text && c.distinct >= 2 && c.distinct <= MAX_GROUPABLE_DISTINCT
-            };
+        if !named(col) && !settled("group") {
             let mut choices: Vec<usize> = vec![col];
             choices.extend((0..columns.len()).filter(|&i| i != col && groupable(i)));
             choices.truncate(MAX_OPTIONS);
             if choices.len() > 1 {
                 let mut options: Vec<ClarifyOption> = choices
                     .into_iter()
-                    .map(|i| option(columns[i].name.clone(), Plan { group_by: Some((i, None)), ..plan.clone() }))
+                    .map(|i| option(columns[i].name.clone(), Plan { group_by: Some((i, None)), ..plan.clone() }, "group"))
                     .collect();
-                options.push(option("Без разбивки".into(), Plan { group_by: None, ..plan.clone() }));
-                return Some(Clarification {
-                    question: "Уточните, по какому столбцу разбить результат:".into(),
-                    table_id: candidate.table_id,
-                    options,
-                });
+                options.push(option("Без разбивки".into(), Plan { group_by: None, ..plan.clone() }, "group"));
+                return ask("Уточните, по какому столбцу разбить результат:".into(), options);
             }
         }
     }
@@ -740,21 +788,123 @@ pub fn clarification(plan: &Plan, candidates: &[Candidate], question: &str) -> O
         // Only columns of the same type: "самый ранний" is a date question,
         // and a sum over a date column is not an alternative to anything.
         let fits = |i: usize| columns[i].kind == columns[col].kind;
-        if !named(col) {
+        if !named(col) && !settled("metric") {
             let mut choices: Vec<usize> = vec![col];
             choices.extend((0..columns.len()).filter(|&i| i != col && fits(i)));
             choices.truncate(MAX_OPTIONS);
             if choices.len() > 1 {
-                return Some(Clarification {
-                    question: "Уточните, какой столбец считать:".into(),
-                    table_id: candidate.table_id,
-                    options: choices
-                        .into_iter()
-                        .map(|i| option(columns[i].name.clone(), Plan { column: Some(i), ..plan.clone() }))
-                        .collect(),
-                });
+                let options = choices
+                    .into_iter()
+                    .map(|i| option(columns[i].name.clone(), Plan { column: Some(i), ..plan.clone() }, "metric"))
+                    .collect();
+                return ask("Уточните, какой столбец считать:".into(), options);
             }
         }
+    }
+
+    let filtered = |i: usize| {
+        plan.filters.iter().any(|f| match f {
+            Filter::Contains { column, .. } | Filter::Number { column, .. } | Filter::Date { column, .. } => *column == i,
+        })
+    };
+    let grouped = |i: usize| plan.group_by.is_some_and(|(g, _)| g == i);
+    let used = |i: usize| filtered(i) || grouped(i) || plan.column == Some(i);
+
+    for (i, c) in columns.iter().enumerate() {
+        let key = format!("value:{}", c.name);
+        if c.kind != ColumnType::Text || filtered(i) || grouped(i) || settled(&key) {
+            continue;
+        }
+        // Closed columns only: their values are all known, so a match is a
+        // real value, not a word that happens to occur in some cell.
+        let Some(values) = c.closed_values() else { continue };
+        if let Some(value) = values.iter().find(|v| names_all(&q, v)) {
+            // The model may have put the value on another column instead
+            // ("Кузнецова" on «Контрагент» — observed): that condition moves
+            // here rather than staying beside the right one, which would
+            // match nothing.
+            let misplaced = |f: &Filter| match f {
+                Filter::Contains { column, value: v, negate: false } => *column != i && mentions(&words(v), value),
+                _ => false,
+            };
+            let with = Plan {
+                filters: {
+                    let mut f: Vec<Filter> = plan.filters.iter().filter(|f| !misplaced(f)).cloned().collect();
+                    f.push(Filter::Contains { column: i, value: value.clone(), negate: false });
+                    f
+                },
+                ..plan.clone()
+            };
+            let options = vec![
+                option(format!("Учесть: «{}» = {value}", c.name), with, &key),
+                option("Не учитывать".into(), plan.clone(), &key),
+            ];
+            return ask(format!("В вопросе есть «{value}» («{}»), но расчёт это не учитывает:", c.name), options);
+        }
+    }
+
+    // A year named as a period ("в 2023 году", "за 2023") but a date
+    // condition open on one side ("≥ 2023" and nothing above): 2023 and
+    // every later year (Qwen3-4B, observed — 1 667 instead of 834).
+    let named_years: Vec<String> = q
+        .iter()
+        .enumerate()
+        .filter(|(k, w)| {
+            w.len() == 4
+                && w.chars().all(|c| c.is_ascii_digit())
+                && (w.starts_with("19") || w.starts_with("20"))
+                && (q.get(k + 1).is_some_and(|n| n.starts_with("год"))
+                    || (*k > 0 && matches!(q[k - 1].as_str(), "в" | "за" | "во")))
+        })
+        .map(|(_, w)| w.clone())
+        .collect();
+    for year in &named_years {
+        for (i, c) in columns.iter().enumerate() {
+            if c.kind != ColumnType::Date {
+                continue;
+            }
+            let on_column: Vec<(Cmp, &String)> = plan
+                .filters
+                .iter()
+                .filter_map(|f| match f {
+                    Filter::Date { column, op, value } if *column == i => Some((*op, value)),
+                    _ => None,
+                })
+                .collect();
+            let mentions_year = on_column.iter().any(|(_, v)| v.starts_with(year.as_str()));
+            let lower = on_column.iter().any(|(op, _)| matches!(op, Cmp::Ge | Cmp::Gt));
+            let upper = on_column.iter().any(|(op, _)| matches!(op, Cmp::Le | Cmp::Lt | Cmp::Eq));
+            let exact = on_column.iter().any(|(op, _)| *op == Cmp::Eq);
+            let key = format!("year:{}:{year}", c.name);
+            if mentions_year && !exact && (lower != upper) && !settled(&key) {
+                let only_year = Plan {
+                    filters: plan
+                        .filters
+                        .iter()
+                        .filter(|f| !matches!(f, Filter::Date { column, .. } if *column == i))
+                        .cloned()
+                        .chain(std::iter::once(Filter::Date { column: i, op: Cmp::Eq, value: year.clone() }))
+                        .collect(),
+                    ..plan.clone()
+                };
+                let open = if lower { format!("С {year} и позже") } else { format!("По {year} включительно") };
+                let options = vec![option(format!("Только {year} год"), only_year, &key), option(open, plan.clone(), &key)];
+                return ask(format!("Условие по «{}» не ограничено {year} годом:", c.name), options);
+            }
+        }
+    }
+
+    for (i, c) in columns.iter().enumerate() {
+        let key = format!("column:{}", c.name);
+        if used(i) || !names_all(&q, &c.name) || settled(&key) {
+            continue;
+        }
+        let mut options = Vec::new();
+        if groupable(i) {
+            options.push(option(format!("Разбить по «{}»", c.name), Plan { group_by: Some((i, None)), ..plan.clone() }, &key));
+        }
+        options.push(option(format!("Считать без «{}»", c.name), plan.clone(), &key));
+        return ask(format!("В вопросе упомянут столбец «{}», но расчёт его не использует:", c.name), options);
     }
     None
 }
@@ -1225,7 +1375,7 @@ mod tests {
         // "фамилия" is not a column: the user chooses.
         let c = clarification(&plan, &candidates, "кол-во договоров и фамилия").expect("must ask back");
         let labels: Vec<&str> = c.options.iter().map(|o| o.label.as_str()).collect();
-        assert_eq!(labels, ["Ответственный", "Номер договора", "Без разбивки"]);
+        assert_eq!(labels, ["Ответственный", "Номер договора", "Без разбивки", "Искать в документах"]);
         // Every option is a plan that parses back to what its label says.
         let chosen = planned(&c.options[1].plan.to_string(), &candidates);
         assert_eq!(chosen.group_by, Some((0, None)));
@@ -1266,7 +1416,7 @@ mod tests {
         assert!(clarification(&sum, &candidates, "общая сумма договоров").is_none());
         let c = clarification(&sum, &candidates, "сколько всего денег по договорам").expect("two number columns");
         let labels: Vec<&str> = c.options.iter().map(|o| o.label.as_str()).collect();
-        assert_eq!(labels, ["Сумма, руб.", "НДС"]);
+        assert_eq!(labels, ["Сумма, руб.", "НДС", "Искать в документах"]);
         // The only date column: "earliest" is not ambiguous.
         let earliest = planned(
             r#"{"answerable": true, "table": "T1", "metric": {"fn": "min", "column": "Дата подписания"},
@@ -1274,6 +1424,99 @@ mod tests {
             &candidates,
         );
         assert!(clarification(&earliest, &candidates, "когда заключён самый ранний договор").is_none());
+    }
+
+    #[test]
+    fn a_value_the_question_names_but_the_plan_ignores_is_asked_back() {
+        // Qwen3-4B, "Сколько расторгнутых договоров у Сидорова в 2023
+        // году?": the manager and the year made it into the plan, the
+        // status did not — 2 500 instead of 833.
+        let mut candidates = registry();
+        candidates[0].columns.push(Column {
+            name:     "Статус".into(),
+            kind:     ColumnType::Text,
+            distinct: 3,
+            top:      vec![("исполнен".into(), 5), ("расторгнут".into(), 3), ("действует".into(), 2)],
+            min:      None,
+            max:      None,
+        });
+        let dropped = planned(
+            r#"{"answerable": true, "table": "T1", "metric": {"fn": "count", "column": null}, "group_by": null,
+               "filters": [{"column": "Ответственный", "op": "contains", "value": "Сидоров"}], "order": "desc"}"#,
+            &candidates,
+        );
+        let q = "Сколько расторгнутых договоров у Сидорова в 2023 году?";
+        let c = clarification(&dropped, &candidates, q).expect("the status must not be dropped silently");
+        let labels: Vec<&str> = c.options.iter().map(|o| o.label.as_str()).collect();
+        assert_eq!(labels, ["Учесть: «Статус» = расторгнут", "Не учитывать", "Искать в документах"]);
+        let with = planned(&c.options[0].plan.to_string(), &candidates);
+        assert!(with.filters.contains(&Filter::Contains { column: 4, value: "расторгнут".into(), negate: false }));
+        // With the condition in the plan there is nothing to ask.
+        assert!(clarification(&with, &candidates, q).is_none());
+
+        // The value on the wrong column (a closed «Ответственный» and the
+        // name put on «Номер договора»): "Учесть" moves it, it does not
+        // leave it there to match nothing.
+        candidates[0].columns[3].top = vec![("Кузнецова Е.В.".into(), 5), ("Сидоров П.П.".into(), 5)];
+        candidates[0].columns[3].distinct = 2;
+        let misplaced = planned(
+            r#"{"answerable": true, "table": "T1", "metric": {"fn": "count", "column": null}, "group_by": null,
+               "filters": [{"column": "Номер договора", "op": "contains", "value": "Кузнецова"}], "order": "desc"}"#,
+            &candidates,
+        );
+        let c = clarification(&misplaced, &candidates, "Сколько договоров у Кузнецовой?").expect("must ask");
+        let fixed = planned(&c.options[0].plan.to_string(), &candidates);
+        assert_eq!(fixed.filters, [Filter::Contains { column: 3, value: "Кузнецова Е.В.".into(), negate: false }]);
+    }
+
+    #[test]
+    fn a_year_named_as_a_period_with_an_open_date_condition_is_asked_back_once() {
+        // Qwen3-4B, "…у Кузнецовой в 2023 году?": "≥ 2023" and no upper
+        // bound — 2023 and 2024 together.
+        let candidates = registry();
+        let open = planned(
+            r#"{"answerable": true, "table": "T1", "metric": {"fn": "count", "column": null}, "group_by": null,
+               "filters": [{"column": "Дата подписания", "op": ">=", "value": "2023"}], "order": "desc"}"#,
+            &candidates,
+        );
+        let q = "Сколько договоров подписано в 2023 году?";
+        let c = clarification(&open, &candidates, q).expect("must ask");
+        let labels: Vec<&str> = c.options.iter().map(|o| o.label.as_str()).collect();
+        assert_eq!(labels, ["Только 2023 год", "С 2023 и позже", "Искать в документах"]);
+        assert_eq!(
+            planned(&c.options[0].plan.to_string(), &candidates).filters,
+            [Filter::Date { column: 2, op: Cmp::Eq, value: "2023".into() }]
+        );
+        // "С 2023 и позже" is settled: checked again, that plan asks nothing.
+        let keep = &c.options[1].plan;
+        let confirmed: Vec<String> = serde_json::from_value(keep["confirmed"].clone()).unwrap();
+        assert!(clarification_after(&planned(&keep.to_string(), &candidates), &candidates, q, &confirmed).is_none());
+        // "после 2022" is not a year named as a period.
+        let after = planned(
+            r#"{"answerable": true, "table": "T1", "metric": {"fn": "count", "column": null}, "group_by": null,
+               "filters": [{"column": "Дата подписания", "op": ">", "value": "2022"}], "order": "desc"}"#,
+            &candidates,
+        );
+        assert!(clarification(&after, &candidates, "Сколько договоров подписано после 2022?").is_none());
+    }
+
+    #[test]
+    fn a_column_the_question_names_but_the_plan_ignores_is_asked_back() {
+        // Qwen3-4B planned a row count for "Что является предметом
+        // договоров?" — a question about text.
+        let mut candidates = registry();
+        candidates[0].columns.push(col("Предмет", ColumnType::Text));
+        let count_all = planned(
+            r#"{"answerable": true, "table": "T1", "metric": {"fn": "count", "column": null}, "group_by": null, "filters": [], "order": "desc"}"#,
+            &candidates,
+        );
+        let c = clarification(&count_all, &candidates, "Что является предметом договоров?").expect("must ask");
+        let labels: Vec<&str> = c.options.iter().map(|o| o.label.as_str()).collect();
+        assert_eq!(labels, ["Разбить по «Предмет»", "Считать без «Предмет»", "Искать в документах"]);
+        assert_eq!(c.options[2].plan, json!({ "answerable": false }));
+        // "договоров" alone does not name «Номер договора»: every question
+        // here says it.
+        assert!(clarification(&count_all, &candidates, "Сколько всего договоров?").is_none());
     }
 
     #[test]

@@ -6,7 +6,7 @@
 ## What this file is
 
 A build brief for the coding agent. **The source of truth for *why* is
-`docs/adr/`** — twenty-one accepted Architecture Decision Records (0001–0010, 0014–0023; 0011 superseded by 0021). This file says *what
+`docs/adr/`** — twenty-two accepted Architecture Decision Records (0001–0010, 0014–0024; 0011 superseded by 0021). This file says *what
 to build, in what order, and which invariants must never be broken.* When a
 decision here seems arbitrary, the matching ADR explains it. Do not contradict
 an ADR; if reality forces a change, write a new ADR that supersedes the old one
@@ -29,7 +29,7 @@ department's content — enforced in the database, not the app (ADR-0008).
 - **Datastore:** PostgreSQL 16+ with the `pgvector` extension. One database for
   relational data, vectors, and full-text (ADR-0005).
 - **Inference:** llama.cpp `llama-server`, bundled as a Tauri sidecar
-  (ADR-0003). One resident base model (e.g. Qwen 2.5) + hot-swappable LoRA
+  (ADR-0003). One resident base model (Qwen3-4B, ADR-0024 — downloaded on first run) + hot-swappable LoRA
   adapters selected per request.
 - **Embeddings:** a local 768-dim model (e.g. `nomic-embed-text`). The dimension
   must match `vector(768)` in the schema.

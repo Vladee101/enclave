@@ -15,6 +15,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 pub mod adapters;
+pub mod models;
 
 /// Name of the embedding model row this sidecar registers in
 /// `embedding_models` (ADR-0007). Change this if you swap in a different
@@ -42,11 +43,7 @@ pub const REGISTER_EMBEDDING_MODEL_SQL: &str = r#"
 /// against the process's working directory, which is not stable once the
 /// app is installed.
 fn model_path(app: &AppHandle, file_name: &str) -> Result<String> {
-    let dir = match std::env::var_os("ENCLAVE_MODELS_DIR") {
-        Some(dir) => std::path::PathBuf::from(dir),
-        None => app.path().app_data_dir().context("Could not resolve app data dir")?.join("models"),
-    };
-    let path = dir.join(file_name);
+    let path = models::models_dir(app)?.join(file_name);
     anyhow::ensure!(path.is_file(), "model file not found: {}", path.display());
     Ok(path.to_string_lossy().into_owned())
 }
@@ -518,7 +515,12 @@ impl LlmClient {
                 "messages": [
                     { "role": "system", "content": system },
                     { "role": "user",   "content": user },
-                ]
+                ],
+                // Qwen3 "thinks" aloud (<think>…</think>) before answering
+                // unless its template is told not to (ADR-0024): slower, and
+                // the planner's JSON grammar has no room for it. Templates
+                // without the switch ignore it.
+                "chat_template_kwargs": { "enable_thinking": false }
             }))
             .send()
             .await?
