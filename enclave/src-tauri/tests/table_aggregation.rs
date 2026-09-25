@@ -204,6 +204,19 @@ async fn calculations_are_exact_and_isolated() -> Result<(), Box<dyn std::error:
         let foreign = plan::execute(&mut tx, &candidates, plan).await?;
         tx.rollback().await?;
         assert_eq!(foreign.matched_rows, 0, "RLS must hide the rows from an outsider");
+
+        // A chosen plan (clarification) names its table by id, from the
+        // client: by id, too, the table exists only for its department.
+        let mut tx = app.begin().await?;
+        set_current_user(&mut tx, outsider).await?;
+        let by_id = plan::load_candidate(&mut tx, candidates[0].table_id).await?;
+        tx.rollback().await?;
+        assert!(by_id.is_none(), "an outsider must not load a table by its id");
+        let mut tx = app.begin().await?;
+        set_current_user(&mut tx, member).await?;
+        let by_id = plan::load_candidate(&mut tx, candidates[0].table_id).await?;
+        tx.rollback().await?;
+        assert_eq!(by_id.map(|c| c.row_count), Some(301));
         assert_eq!(foreign.groups[0].value.as_deref(), Some("0"));
     }
 

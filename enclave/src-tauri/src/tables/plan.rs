@@ -15,7 +15,7 @@
 //!    transaction, so RLS decides which rows exist (ADR-0008).
 
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{PgConnection, Row};
 use uuid::Uuid;
@@ -79,18 +79,36 @@ pub async fn load_candidates(conn: &mut PgConnection, document_ids: &[Uuid]) -> 
     .fetch_all(&mut *conn)
     .await?;
 
-    rows.into_iter()
-        .map(|r| {
-            Ok(Candidate {
-                table_id:    r.try_get("id")?,
-                document_id: r.try_get("document_id")?,
-                filename:    r.try_get("title")?,
-                sheet:       r.try_get("sheet")?,
-                row_count:   r.try_get::<i32, _>("row_count")? as i64,
-                columns:     serde_json::from_value(r.try_get("columns")?)?,
-            })
-        })
-        .collect()
+    rows.iter().map(candidate_from_row).collect()
+}
+
+/// One table by id, as this user sees it (RLS applies) — for a plan the
+/// user chose in a clarification. None if the table is not visible or its
+/// document is gone.
+pub async fn load_candidate(conn: &mut PgConnection, table_id: Uuid) -> Result<Option<Candidate>> {
+    let row = sqlx::query(
+        r#"
+        SELECT t.id, t.document_id, d.title, t.sheet, t.row_count, t.columns
+        FROM sheet_tables t
+        JOIN documents d ON d.id = t.document_id
+        WHERE t.id = $1 AND d.status = 'ready' AND d.deleted_at IS NULL
+        "#,
+    )
+    .bind(table_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    row.as_ref().map(candidate_from_row).transpose()
+}
+
+fn candidate_from_row(r: &sqlx::postgres::PgRow) -> Result<Candidate> {
+    Ok(Candidate {
+        table_id:    r.try_get("id")?,
+        document_id: r.try_get("document_id")?,
+        filename:    r.try_get("title")?,
+        sheet:       r.try_get("sheet")?,
+        row_count:   r.try_get::<i32, _>("row_count")? as i64,
+        columns:     serde_json::from_value(r.try_get("columns")?)?,
+    })
 }
 
 // ─── What the planner sees ───────────────────────────────────────────────────
@@ -314,6 +332,18 @@ impl Cmp {
         match self {
             Cmp::Eq => "=",
             Cmp::Ne => "<>",
+            Cmp::Gt => ">",
+            Cmp::Ge => ">=",
+            Cmp::Lt => "<",
+            Cmp::Le => "<=",
+        }
+    }
+
+    /// The operator as the planner writes it.
+    fn json(self) -> &'static str {
+        match self {
+            Cmp::Eq => "=",
+            Cmp::Ne => "!=",
             Cmp::Gt => ">",
             Cmp::Ge => ">=",
             Cmp::Lt => "<",
@@ -574,6 +604,161 @@ pub fn parse_plan(answer: &str, candidates: &[Candidate]) -> Result<Option<Plan>
     }))
 }
 
+// ─── Asking back ─────────────────────────────────────────────────────────────
+
+/// A text column with more distinct values than this is not offered as a
+/// grouping: one group per contract number is not an answer.
+const MAX_GROUPABLE_DISTINCT: i64 = 1000;
+
+/// Options offered in one clarification, the model's own choice first.
+const MAX_OPTIONS: usize = 5;
+
+/// A choice the user makes before the calculation runs: the plan's column
+/// was the model's guess, not something the question says.
+#[derive(Debug, Clone, Serialize)]
+pub struct Clarification {
+    pub question: String,
+    pub table_id: Uuid,
+    pub options:  Vec<ClarifyOption>,
+}
+
+/// One answer to a clarification: a complete plan, sent back as is with
+/// the question. The core checks it like any planner output (`parse_plan`
+/// against the table as this user sees it) — it is data, not trusted.
+#[derive(Debug, Clone, Serialize)]
+pub struct ClarifyOption {
+    pub label: String,
+    pub plan:  Value,
+}
+
+/// Lowercased words of `text`, letters and digits only.
+fn words(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_lowercase())
+        .collect()
+}
+
+/// Whether the question names `phrase` — any of its words of three or more
+/// letters, allowing for Russian endings: "статус" is named by "статусу",
+/// "Ответственный" by "ответственного". A crude stem (the word minus two
+/// letters, at least four), which is enough to tell "фамилия" from
+/// "Контрагент".
+fn mentions(question_words: &[String], phrase: &str) -> bool {
+    words(phrase).iter().filter(|w| w.chars().count() >= 3).any(|w| {
+        let len = w.chars().count();
+        let stem: String = if len > 4 { w.chars().take((len - 2).max(4)).collect() } else { w.clone() };
+        question_words.iter().any(|q| q.starts_with(&stem))
+    })
+}
+
+impl Plan {
+    /// The plan in the planner's JSON form, for table "T1" — what a
+    /// clarification option carries and `parse_plan` reads back.
+    pub fn to_json(&self, candidate: &Candidate) -> Value {
+        let name = |i: usize| candidate.columns[i].name.clone();
+        let filters: Vec<Value> = self
+            .filters
+            .iter()
+            .map(|f| match f {
+                Filter::Contains { column, value, negate } => json!({
+                    "column": name(*column),
+                    "op": if *negate { "not_contains" } else { "contains" },
+                    "value": value
+                }),
+                Filter::Number { column, op, value } | Filter::Date { column, op, value } => {
+                    json!({ "column": name(*column), "op": op.json(), "value": value })
+                }
+            })
+            .collect();
+        let group_by = match self.group_by {
+            None => Value::Null,
+            Some((col, None)) => json!({ "column": name(col) }),
+            Some((col, Some(p))) => json!({
+                "column": name(col),
+                "period": match p { Period::Year => "year", Period::Month => "month", Period::Day => "day" }
+            }),
+        };
+        let func = match self.func {
+            Func::Count => "count",
+            Func::Sum => "sum",
+            Func::Avg => "avg",
+            Func::Min => "min",
+            Func::Max => "max",
+        };
+        json!({
+            "answerable": true,
+            "table": "T1",
+            "metric": { "fn": func, "column": self.column.map(name) },
+            "group_by": group_by,
+            "filters": filters,
+            "order": if self.descending { "desc" } else { "asc" }
+        })
+    }
+}
+
+/// Whether the plan rests on a column the question never names — then the
+/// user chooses instead of the model guessing. Checked: the grouping column
+/// (dates grouped by a period excepted: "по годам" has one reading), and
+/// the metric's column when the table has more than one it could be.
+/// Deterministic, in the core: a small model cannot be relied on to notice
+/// its own guess.
+pub fn clarification(plan: &Plan, candidates: &[Candidate], question: &str) -> Option<Clarification> {
+    let candidate = candidates.get(plan.table)?;
+    let columns = &candidate.columns;
+    let q = words(question);
+    let named = |i: usize| {
+        mentions(&q, &columns[i].name) || columns[i].top.iter().any(|(value, _)| mentions(&q, value))
+    };
+    let option = |label: String, plan: Plan| ClarifyOption { label, plan: plan.to_json(candidate) };
+
+    if let Some((col, None)) = plan.group_by {
+        if !named(col) {
+            let groupable = |i: usize| {
+                let c = &columns[i];
+                c.kind == ColumnType::Text && c.distinct >= 2 && c.distinct <= MAX_GROUPABLE_DISTINCT
+            };
+            let mut choices: Vec<usize> = vec![col];
+            choices.extend((0..columns.len()).filter(|&i| i != col && groupable(i)));
+            choices.truncate(MAX_OPTIONS);
+            if choices.len() > 1 {
+                let mut options: Vec<ClarifyOption> = choices
+                    .into_iter()
+                    .map(|i| option(columns[i].name.clone(), Plan { group_by: Some((i, None)), ..plan.clone() }))
+                    .collect();
+                options.push(option("Без разбивки".into(), Plan { group_by: None, ..plan.clone() }));
+                return Some(Clarification {
+                    question: "Уточните, по какому столбцу разбить результат:".into(),
+                    table_id: candidate.table_id,
+                    options,
+                });
+            }
+        }
+    }
+
+    if let (Some(col), Func::Sum | Func::Avg | Func::Min | Func::Max) = (plan.column, plan.func) {
+        // Only columns of the same type: "самый ранний" is a date question,
+        // and a sum over a date column is not an alternative to anything.
+        let fits = |i: usize| columns[i].kind == columns[col].kind;
+        if !named(col) {
+            let mut choices: Vec<usize> = vec![col];
+            choices.extend((0..columns.len()).filter(|&i| i != col && fits(i)));
+            choices.truncate(MAX_OPTIONS);
+            if choices.len() > 1 {
+                return Some(Clarification {
+                    question: "Уточните, какой столбец считать:".into(),
+                    table_id: candidate.table_id,
+                    options: choices
+                        .into_iter()
+                        .map(|i| option(columns[i].name.clone(), Plan { column: Some(i), ..plan.clone() }))
+                        .collect(),
+                });
+            }
+        }
+    }
+    None
+}
+
 // ─── Execution ───────────────────────────────────────────────────────────────
 
 enum Param {
@@ -800,7 +985,24 @@ impl Computation {
             out.push_str(&format!("Условия: {}.\n", conditions.join("; ")));
         }
         out.push_str(&format!("Подошло строк: {}.\n", readable(&self.matched_rows.to_string())));
+        out.push_str(&self.result_text());
+        out
+    }
 
+    /// The answer itself when the result is split into groups: the list,
+    /// written by the core. A small model restating a list of groups merges
+    /// them, drops their numbers or pairs a name with the grand total
+    /// ("50 000, фамилия: Иванов И.И." — observed); the list needs no
+    /// rephrasing, so the model is not asked. None for a single result,
+    /// which the model states well.
+    pub fn grouped_answer(&self) -> Option<String> {
+        self.plan.group_by.map(|_| self.result_text())
+    }
+
+    /// The result lines: the metric, one line per group when grouped.
+    fn result_text(&self) -> String {
+        let plan = &self.plan;
+        let mut out = String::new();
         let metric = match (plan.func, plan.column) {
             (Func::Count, _) | (_, None) => "Количество строк".to_string(),
             (Func::Sum, Some(c)) => format!("Сумма «{}»", self.column_name(c)),
@@ -852,6 +1054,8 @@ pub fn answer_messages(computation: &Computation, question: &str) -> (&'static s
                   The source is the exact result of a calculation the application ran over a spreadsheet. \
                   Report its numbers exactly as written there — never recalculate, round or convert them — \
                   and say which conditions the calculation used. Cite it as [Source 1]. \
+                  If the result is split into groups, list every group with its own number, \
+                  one per line, exactly as in the source; never merge them into one total. \
                   If no rows matched, say so and name the conditions. \
                   Answer once, concisely, in the language of the question.";
     (
@@ -1002,6 +1206,74 @@ mod tests {
         assert_eq!(closed["properties"]["value"]["enum"], json!(["исполнен", "расторгнут"]));
         // Open text columns share one free-text variant.
         assert!(filters.iter().any(|f| f["properties"]["column"]["enum"] == json!(["Номер договора", "Ответственный"])));
+    }
+
+    fn planned(answer: &str, candidates: &[Candidate]) -> Plan {
+        parse_plan(answer, candidates).unwrap().unwrap()
+    }
+
+    #[test]
+    fn a_grouping_the_question_never_names_is_asked_back() {
+        let candidates = registry();
+        let by_manager = r#"{"answerable": true, "table": "T1", "metric": {"fn": "count", "column": null},
+            "group_by": {"column": "Ответственный"}, "filters": [], "order": "desc"}"#;
+        let plan = planned(by_manager, &candidates);
+
+        // Named, in another case — no question.
+        assert!(clarification(&plan, &candidates, "Сколько договоров у каждого ответственного?").is_none());
+
+        // "фамилия" is not a column: the user chooses.
+        let c = clarification(&plan, &candidates, "кол-во договоров и фамилия").expect("must ask back");
+        let labels: Vec<&str> = c.options.iter().map(|o| o.label.as_str()).collect();
+        assert_eq!(labels, ["Ответственный", "Номер договора", "Без разбивки"]);
+        // Every option is a plan that parses back to what its label says.
+        let chosen = planned(&c.options[1].plan.to_string(), &candidates);
+        assert_eq!(chosen.group_by, Some((0, None)));
+        assert_eq!(planned(&c.options[2].plan.to_string(), &candidates).group_by, None);
+        assert_eq!(planned(&c.options[0].plan.to_string(), &candidates), plan);
+    }
+
+    #[test]
+    fn values_and_date_periods_count_as_named() {
+        let mut candidates = registry();
+        candidates[0].columns[3].top = vec![("Иванов И.И.".into(), 5), ("Петрова А.С.".into(), 5)];
+        candidates[0].columns[3].distinct = 2;
+        let by_manager = planned(
+            r#"{"answerable": true, "table": "T1", "metric": {"fn": "count", "column": null},
+               "group_by": {"column": "Ответственный"}, "filters": [], "order": "desc"}"#,
+            &candidates,
+        );
+        // A value of the column names it.
+        assert!(clarification(&by_manager, &candidates, "сколько договоров у Иванова и Петровой").is_none());
+        // Grouping a date by year has one reading.
+        let by_year = planned(
+            r#"{"answerable": true, "table": "T1", "metric": {"fn": "count", "column": null},
+               "group_by": {"column": "Дата подписания", "period": "year"}, "filters": [], "order": "desc"}"#,
+            &candidates,
+        );
+        assert!(clarification(&by_year, &candidates, "сколько договоров по годам").is_none());
+    }
+
+    #[test]
+    fn a_metric_column_is_asked_back_only_among_its_own_type() {
+        let mut candidates = registry();
+        candidates[0].columns.push(col("НДС", ColumnType::Number));
+        let sum = planned(
+            r#"{"answerable": true, "table": "T1", "metric": {"fn": "sum", "column": "Сумма, руб."},
+               "group_by": null, "filters": [], "order": "desc"}"#,
+            &candidates,
+        );
+        assert!(clarification(&sum, &candidates, "общая сумма договоров").is_none());
+        let c = clarification(&sum, &candidates, "сколько всего денег по договорам").expect("two number columns");
+        let labels: Vec<&str> = c.options.iter().map(|o| o.label.as_str()).collect();
+        assert_eq!(labels, ["Сумма, руб.", "НДС"]);
+        // The only date column: "earliest" is not ambiguous.
+        let earliest = planned(
+            r#"{"answerable": true, "table": "T1", "metric": {"fn": "min", "column": "Дата подписания"},
+               "group_by": null, "filters": [], "order": "asc"}"#,
+            &candidates,
+        );
+        assert!(clarification(&earliest, &candidates, "когда заключён самый ранний договор").is_none());
     }
 
     #[test]

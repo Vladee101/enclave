@@ -17,6 +17,17 @@ use crate::{
 pub struct QueryArgs {
     pub query:   String,
     pub top_k:   Option<usize>,
+    /// The plan the user picked in a clarification (ADR-0022): run it
+    /// instead of asking the planner. Untrusted like any plan — it is
+    /// checked against the table as this user sees it.
+    #[serde(default)]
+    pub plan:    Option<ChosenPlan>,
+}
+
+#[derive(Deserialize)]
+pub struct ChosenPlan {
+    pub table_id: Uuid,
+    pub plan:     serde_json::Value,
 }
 
 #[derive(Serialize)]
@@ -29,19 +40,27 @@ pub struct SourceRef {
 
 #[derive(Serialize)]
 pub struct QueryResult {
-    pub answer:      String,
-    pub sources:     Vec<SourceRef>,
+    pub answer:        String,
+    pub sources:       Vec<SourceRef>,
     /// Set when the answer is a calculation over a spreadsheet table
     /// (ADR-0022): what was computed, shown under the answer.
-    pub calculation: Option<String>,
+    pub calculation:   Option<String>,
+    /// Set instead of an answer when the calculation needs the user's
+    /// choice first; `answer` then holds its question.
+    pub clarification: Option<plan::Clarification>,
 }
 
 /// Everything the completion needs, and what to show next to the answer.
+/// With a ready `answer` there is nothing to complete: `prompt` is empty.
 pub struct Prepared {
-    pub prompt:      String,
-    pub lora:        Vec<crate::llm::LoraEntry>,
-    pub sources:     Vec<SourceRef>,
-    pub calculation: Option<String>,
+    pub prompt:        String,
+    /// The answer, written by the core — a clarification's question, or
+    /// the list of groups of a grouped calculation. No model call.
+    pub answer:        Option<String>,
+    pub lora:          Vec<crate::llm::LoraEntry>,
+    pub sources:       Vec<SourceRef>,
+    pub calculation:   Option<String>,
+    pub clarification: Option<plan::Clarification>,
 }
 
 /// Shared prep for both blocking and streaming query commands (and the
@@ -54,16 +73,25 @@ pub struct Prepared {
 ///    spreadsheet tables among the retrieved documents (ADR-0022).
 /// 3. No tables → audit and commit in that transaction, grounded prompt.
 /// 4. Tables → commit the reads, ask the planner (no transaction open),
-///    then a second identity-scoped transaction runs the validated plan
-///    and writes the audit record. No plan, or a plan that fails → the
-///    same grounded prompt as step 3. A calculation is never guessed at:
-///    the fallback is ordinary retrieval, not an approximate number.
+///    then a second identity-scoped transaction either asks the user back
+///    (the plan rests on a column the question never names) or runs the
+///    validated plan, and writes the audit record. No plan, or a plan that
+///    fails → the same grounded prompt as step 3. A calculation is never
+///    guessed at: the fallback is ordinary retrieval, not an approximate
+///    number.
+///
+/// With `args.plan` (the user's pick from a clarification) steps 1–4 are
+/// skipped: that plan runs on its table, or the call fails.
 pub async fn prepare(
     pool:    &PgPool,
     llm:     &LlmClient,
     user_id: Uuid,
     args:    &QueryArgs,
 ) -> Result<Prepared, String> {
+    if let Some(chosen) = &args.plan {
+        return prepare_chosen(pool, llm, user_id, args, chosen).await;
+    }
+
     let top_k = args.top_k.unwrap_or(5);
     let e = |e: anyhow::Error| e.to_string();
     let db = |e: sqlx::Error| e.to_string();
@@ -94,6 +122,37 @@ pub async fn prepare(
 
         let mut tx = pool.begin().await.map_err(db)?;
         set_current_user(&mut tx, user_id).await.map_err(e)?;
+
+        if let Some(clarification) = plan.as_ref().and_then(|p| plan::clarification(p, &candidates, &args.query)) {
+            // Nothing is computed or shown but column names; audited all
+            // the same — the user's question touched this table.
+            let document_id = candidates.iter().find(|c| c.table_id == clarification.table_id).map(|c| c.document_id);
+            audit::record(
+                &mut tx,
+                Some(user_id),
+                None,
+                event::QUERY,
+                serde_json::json!({
+                    "document_ids": document_id.into_iter().collect::<Vec<_>>(),
+                    "chunk_ids": [],
+                    "table_id": clarification.table_id,
+                    "clarification": true,
+                    "top_k": top_k,
+                }),
+            )
+            .await
+            .map_err(e)?;
+            tx.commit().await.map_err(db)?;
+            return Ok(Prepared {
+                prompt: String::new(),
+                answer: Some(clarification.question.clone()),
+                lora,
+                sources: Vec::new(),
+                calculation: None,
+                clarification: Some(clarification),
+            });
+        }
+
         let computation = match plan {
             None => None,
             Some(plan) => {
@@ -114,21 +173,7 @@ pub async fn prepare(
             }
         };
         match &computation {
-            Some(c) => audit::record(
-                &mut tx,
-                Some(user_id),
-                None,
-                event::QUERY,
-                serde_json::json!({
-                    "document_ids": [c.candidate.document_id],
-                    "chunk_ids": [],
-                    "table_id": c.candidate.table_id,
-                    "matched_rows": c.matched_rows,
-                    "top_k": top_k,
-                }),
-            )
-            .await
-            .map_err(e)?,
+            Some(c) => audit_computation(&mut tx, user_id, c, top_k).await.map_err(e)?,
             None => audit_retrieval(&mut tx, user_id, &chunks, top_k).await.map_err(e)?,
         }
         tx.commit().await.map_err(db)?;
@@ -136,33 +181,107 @@ pub async fn prepare(
     };
 
     // Transactions are committed — these HTTP calls hold no connection.
-    let prepared = match computation {
-        Some(c) => {
-            let (system, user) = plan::answer_messages(&c, &args.query);
-            let description = c.describe();
-            Prepared {
-                prompt: llm.apply_template(system, &user).await.map_err(e)?,
-                lora,
-                sources: vec![SourceRef {
-                    document_id: c.candidate.document_id,
-                    filename:    c.candidate.filename.clone(),
-                    excerpt:     description.clone(),
-                    score:       1.0,
-                }],
-                calculation: Some(description),
-            }
-        }
+    match computation {
+        Some(c) => computed(llm, lora, &c, &args.query).await,
         None => {
             let (system, user) = grounded_messages(&chunks, &args.query);
-            Prepared {
+            Ok(Prepared {
                 prompt: llm.apply_template(system, &user).await.map_err(e)?,
+                answer: None,
                 lora,
                 sources: into_sources(chunks),
                 calculation: None,
-            }
+                clarification: None,
+            })
+        }
+    }
+}
+
+/// The user's pick from a clarification: its table, loaded under RLS, and
+/// its plan, checked by `parse_plan` exactly like the planner's output.
+async fn prepare_chosen(
+    pool:    &PgPool,
+    llm:     &LlmClient,
+    user_id: Uuid,
+    args:    &QueryArgs,
+    chosen:  &ChosenPlan,
+) -> Result<Prepared, String> {
+    let top_k = args.top_k.unwrap_or(5);
+    let e = |e: anyhow::Error| e.to_string();
+    let db = |e: sqlx::Error| e.to_string();
+
+    let mut tx = pool.begin().await.map_err(db)?;
+    set_current_user(&mut tx, user_id).await.map_err(e)?;
+    let lora = adapters_for_user(&mut tx, llm, user_id).await.map_err(e)?;
+    let candidate = plan::load_candidate(&mut tx, chosen.table_id)
+        .await
+        .map_err(e)?
+        .ok_or_else(|| "The table is no longer available.".to_string())?;
+    let candidates = [candidate];
+    let plan = plan::parse_plan(&chosen.plan.to_string(), &candidates)
+        .map_err(e)?
+        .ok_or_else(|| "The chosen option is not a calculation.".to_string())?;
+    let computation = plan::execute(&mut tx, &candidates, plan).await.map_err(e)?;
+    audit_computation(&mut tx, user_id, &computation, top_k).await.map_err(e)?;
+    tx.commit().await.map_err(db)?;
+
+    computed(llm, lora, &computation, &args.query).await
+}
+
+/// The answer prompt for a computation, with the computation as its only
+/// source. No transaction is open here (invariant #4).
+async fn computed(
+    llm:         &LlmClient,
+    lora:        Vec<crate::llm::LoraEntry>,
+    computation: &plan::Computation,
+    question:    &str,
+) -> Result<Prepared, String> {
+    let description = computation.describe();
+    let answer = computation.grouped_answer();
+    let prompt = match answer {
+        Some(_) => String::new(),
+        None => {
+            let (system, user) = plan::answer_messages(computation, question);
+            llm.apply_template(system, &user).await.map_err(|e| e.to_string())?
         }
     };
-    Ok(prepared)
+    Ok(Prepared {
+        prompt,
+        answer,
+        lora,
+        sources: vec![SourceRef {
+            document_id: computation.candidate.document_id,
+            filename:    computation.candidate.filename.clone(),
+            excerpt:     description.clone(),
+            score:       1.0,
+        }],
+        calculation: Some(description),
+        clarification: None,
+    })
+}
+
+/// Audit record for a calculation: the document, the table and how many
+/// rows the plan matched — identifiers and a count, no content.
+async fn audit_computation(
+    tx:          &mut sqlx::PgConnection,
+    user_id:     Uuid,
+    computation: &plan::Computation,
+    top_k:       usize,
+) -> anyhow::Result<()> {
+    audit::record(
+        tx,
+        Some(user_id),
+        None,
+        event::QUERY,
+        serde_json::json!({
+            "document_ids": [computation.candidate.document_id],
+            "chunk_ids": [],
+            "table_id": computation.candidate.table_id,
+            "matched_rows": computation.matched_rows,
+            "top_k": top_k,
+        }),
+    )
+    .await
 }
 
 /// Audited in the retrieval transaction: the record is what this user was
@@ -257,7 +376,11 @@ pub async fn cmd_query(
 ) -> Result<QueryResult, String> {
     let user_id = session.require()?.id;
     let llm = require_llm(&llm)?;
-    let Prepared { prompt, lora, sources, calculation } = prepare(&state.app_pool, llm, user_id, &args).await?;
+    let Prepared { prompt, answer, lora, sources, calculation, clarification } =
+        prepare(&state.app_pool, llm, user_id, &args).await?;
+    if let Some(answer) = answer {
+        return Ok(QueryResult { answer, sources, calculation, clarification });
+    }
 
     let req = CompletionRequest {
         prompt,
@@ -269,7 +392,7 @@ pub async fn cmd_query(
     };
     let answer = llm.complete(&req).await.map_err(|e| e.to_string())?;
 
-    Ok(QueryResult { answer, sources, calculation })
+    Ok(QueryResult { answer, sources, calculation, clarification: None })
 }
 
 /// Token payload emitted on `llm-token:<request_id>` as the answer streams in.
@@ -291,7 +414,14 @@ pub async fn cmd_query_stream(
 ) -> Result<QueryResult, String> {
     let user_id = session.require()?.id;
     let llm = require_llm(&llm)?;
-    let Prepared { prompt, lora, sources, calculation } = prepare(&state.app_pool, llm, user_id, &args).await?;
+    let Prepared { prompt, answer, lora, sources, calculation, clarification } =
+        prepare(&state.app_pool, llm, user_id, &args).await?;
+    let event_name = format!("llm-token:{request_id}");
+    if let Some(answer) = answer {
+        // Delivered the way a stream is, in one piece.
+        let _ = app.emit(&event_name, StreamToken { token: answer.clone() });
+        return Ok(QueryResult { answer, sources, calculation, clarification });
+    }
 
     let req = CompletionRequest {
         prompt,
@@ -302,7 +432,6 @@ pub async fn cmd_query_stream(
         json_schema: None,
     };
 
-    let event_name = format!("llm-token:{request_id}");
     let answer = llm
         .complete_stream(&req, |token| {
             let _ = app.emit(&event_name, StreamToken { token: token.to_string() });
@@ -310,7 +439,7 @@ pub async fn cmd_query_stream(
         .await
         .map_err(|e| e.to_string())?;
 
-    Ok(QueryResult { answer, sources, calculation })
+    Ok(QueryResult { answer, sources, calculation, clarification: None })
 }
 
 #[cfg(test)]

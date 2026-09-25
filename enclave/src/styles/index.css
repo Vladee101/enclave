@@ -390,6 +390,27 @@ html, body, #root {
 
 .source-chip:hover { border-color: var(--accent-border); color: var(--text-accent); }
 
+.message-clarify {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.clarify-option {
+  font-size: 12px;
+  padding: 5px 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: border-color var(--transition), color var(--transition);
+}
+
+.clarify-option:hover:not(:disabled) { border-color: var(--accent-border); color: var(--text-accent); }
+.clarify-option:disabled { opacity: 0.5; cursor: default; }
+
 .message-calculation {
   margin-top: 6px;
   font-size: 12px;

@@ -6,7 +6,7 @@
 ## What this file is
 
 A build brief for the coding agent. **The source of truth for *why* is
-`docs/adr/`** — nineteen accepted Architecture Decision Records (0001–0010, 0015–0022; 0011 superseded by 0021). This file says *what
+`docs/adr/`** — twenty accepted Architecture Decision Records (0001–0010, 0015–0023; 0011 superseded by 0021). This file says *what
 to build, in what order, and which invariants must never be broken.* When a
 decision here seems arbitrary, the matching ADR explains it. Do not contradict
 an ADR; if reality forces a change, write a new ADR that supersedes the old one
@@ -95,6 +95,10 @@ department's content — enforced in the database, not the app (ADR-0008).
     `sheet_rows` are written only by the ingestion worker (department_id
     stamped as for chunks) and purged with their document by trigger. A plan
     that fails falls back to retrieval, never to an approximate number.
+    A plan the user picked in a clarification (ADR-0023) arrives from the
+    client and gets exactly the same treatment: its table is loaded by id
+    under RLS (`load_candidate`), the plan goes through `parse_plan`, the
+    SQL through the same compiler. Never trust it more than model output.
 
 ## Build tasks (in order)
 

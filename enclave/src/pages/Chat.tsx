@@ -1,6 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
-import { useLlmStream } from '../hooks/useLlmStream';
+import { useLlmStream, type ChosenPlan, type Clarification } from '../hooks/useLlmStream';
 import { Spinner } from '../components/Spinner';
 
 interface SourceRef {
@@ -16,11 +16,14 @@ interface Message {
   content: string;
   sources?: SourceRef[];
   calculation?: string | null;
+  clarification?: Clarification | null;
+  /** The question a bot message answers — asked again with a chosen plan. */
+  question?: string;
 }
 
 export function ChatPage() {
   const { user } = useAuth();
-  const { partial, sources, calculation, streaming, ask } = useLlmStream();
+  const { partial, sources, calculation, clarification, streaming, ask } = useLlmStream();
   const [messages, setMessages]   = useState<Message[]>([]);
   const [input,    setInput]      = useState('');
   const streamingId = useRef<number | null>(null);
@@ -35,23 +38,23 @@ export function ChatPage() {
   useEffect(() => {
     if (streamingId.current === null) return;
     const id = streamingId.current;
-    setMessages(prev => prev.map(m => (m.id === id ? { ...m, content: partial, sources, calculation } : m)));
+    setMessages(prev => prev.map(m => (m.id === id ? { ...m, content: partial, sources, calculation, clarification } : m)));
     scrollBottom();
-  }, [partial, sources, calculation]);
+  }, [partial, sources, calculation, clarification]);
 
-  const sendMessage = useCallback(async () => {
-    const q = input.trim();
-    if (!q || streaming || !user) return;
+  // `shown` is what appears as the user's message: the question, or the
+  // label of the option picked in a clarification.
+  const run = useCallback(async (q: string, shown: string, plan?: ChosenPlan) => {
+    if (streaming || !user) return;
 
-    const userMsg: Message = { id: nextId.current++, role: 'user', content: q };
+    const userMsg: Message = { id: nextId.current++, role: 'user', content: shown };
     const botId = nextId.current++;
     streamingId.current = botId;
-    setMessages(prev => [...prev, userMsg, { id: botId, role: 'bot', content: '' }]);
-    setInput('');
+    setMessages(prev => [...prev, userMsg, { id: botId, role: 'bot', content: '', question: q }]);
     setTimeout(scrollBottom, 50);
 
     try {
-      await ask(q, 5);
+      await ask(q, 5, plan);
     } catch (e) {
       setMessages(prev => prev.map(m => (
         m.id === botId ? { ...m, content: `⚠️ Error: ${String(e)}` } : m
@@ -60,7 +63,14 @@ export function ChatPage() {
       streamingId.current = null;
       setTimeout(scrollBottom, 50);
     }
-  }, [input, streaming, user, ask]);
+  }, [streaming, user, ask]);
+
+  const sendMessage = useCallback(() => {
+    const q = input.trim();
+    if (!q) return;
+    setInput('');
+    run(q, q);
+  }, [input, run]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -105,6 +115,21 @@ export function ChatPage() {
                 </div>
               ) : (
                 <div className="message-bubble">{msg.content}</div>
+              )}
+              {msg.clarification && msg.question && (
+                <div className="message-clarify">
+                  {msg.clarification.options.map((o, i) => (
+                    <button
+                      key={i}
+                      type="button"
+                      className="clarify-option"
+                      disabled={streaming}
+                      onClick={() => run(msg.question!, o.label, { table_id: msg.clarification!.table_id, plan: o.plan })}
+                    >
+                      {o.label}
+                    </button>
+                  ))}
+                </div>
               )}
               {msg.calculation && (
                 <details className="message-calculation">

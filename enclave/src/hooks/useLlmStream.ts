@@ -9,11 +9,32 @@ interface SourceRef {
   score:       number;
 }
 
+/** One answer to a clarification: a complete plan the core re-checks. */
+export interface ClarifyOption {
+  label: string;
+  plan:  unknown;
+}
+
+/** The core asks back before calculating (ADR-0022). */
+export interface Clarification {
+  question: string;
+  table_id: string;
+  options:  ClarifyOption[];
+}
+
+/** The user's pick, sent back with the original question. */
+export interface ChosenPlan {
+  table_id: string;
+  plan:     unknown;
+}
+
 interface QueryResult {
   answer:  string;
   sources: SourceRef[];
   /** Set when the answer is a calculation over a spreadsheet (ADR-0022). */
   calculation: string | null;
+  /** Set instead of an answer; `answer` then holds its question. */
+  clarification: Clarification | null;
 }
 
 interface StreamTokenEvent {
@@ -30,6 +51,7 @@ export function useLlmStream() {
   const [partial,   setPartial]   = useState('');
   const [sources,   setSources]   = useState<SourceRef[]>([]);
   const [calculation, setCalculation] = useState<string | null>(null);
+  const [clarification, setClarification] = useState<Clarification | null>(null);
   const [streaming, setStreaming] = useState(false);
   const [error,     setError]     = useState<string | null>(null);
   const unlisten = useRef<UnlistenFn | null>(null);
@@ -40,11 +62,12 @@ export function useLlmStream() {
     setStreaming(false);
   }, []);
 
-  const ask = useCallback(async (query: string, topK = 5) => {
+  const ask = useCallback(async (query: string, topK = 5, plan?: ChosenPlan) => {
     cancel();
     setPartial('');
     setSources([]);
     setCalculation(null);
+    setClarification(null);
     setError(null);
     setStreaming(true);
 
@@ -58,11 +81,12 @@ export function useLlmStream() {
 
       const result = await invoke<QueryResult>('cmd_query_stream', {
         requestId,
-        args: { query, top_k: topK }, // identity comes from the core session
+        args: { query, top_k: topK, plan: plan ?? null }, // identity comes from the core session
       });
 
       setSources(result.sources);
       setCalculation(result.calculation);
+      setClarification(result.clarification);
       // Reconcile to the authoritative final answer in case streamed
       // tokens and the buffered result diverge (e.g. trailing whitespace).
       setPartial(result.answer);
@@ -77,5 +101,5 @@ export function useLlmStream() {
     }
   }, [cancel]);
 
-  return { partial, sources, calculation, streaming, error, ask, cancel };
+  return { partial, sources, calculation, clarification, streaming, error, ask, cancel };
 }
