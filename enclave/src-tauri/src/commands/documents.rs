@@ -212,6 +212,64 @@ pub async fn cmd_list_documents(
     Ok(docs)
 }
 
+/// One sheet of a spreadsheet as the chat's side panel shows it: its
+/// columns' names and types, nothing more.
+#[derive(Serialize, Debug)]
+pub struct TableOutline {
+    pub document_id: Uuid,
+    pub sheet:       String,
+    pub row_count:   i32,
+    pub columns:     Vec<ColumnOutline>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct ColumnOutline {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub kind: crate::tables::ColumnType,
+}
+
+/// The sheets of every spreadsheet this user can see, with their columns,
+/// so that a question can be asked in the table's own words ("Ответственный",
+/// not "фамилия"). Under RLS like the document list. Only names and types
+/// leave the core: the frequent values and ranges stored for the planner
+/// are cell contents, and a column list has no reason to carry them.
+#[tauri::command]
+pub async fn cmd_list_document_tables(
+    state:   State<'_, AppState>,
+    session: State<'_, Session>,
+) -> Result<Vec<TableOutline>, String> {
+    let user_id = session.require()?.id;
+    let mut tx = state.app_pool.begin().await.map_err(|e| e.to_string())?;
+    set_current_user(&mut tx, user_id).await.map_err(|e| e.to_string())?;
+
+    let rows: Vec<(Uuid, String, i32, serde_json::Value)> = sqlx::query_as(
+        r#"
+        SELECT t.document_id, t.sheet, t.row_count, t.columns
+        FROM sheet_tables t
+        JOIN documents d ON d.id = t.document_id
+        WHERE d.status = 'ready' AND d.deleted_at IS NULL
+        ORDER BY t.document_id, t.sheet_index
+        "#,
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(|e| e.to_string())?;
+
+    rows.into_iter()
+        .map(|(document_id, sheet, row_count, columns)| {
+            let columns: Vec<crate::tables::Column> = serde_json::from_value(columns).map_err(|e| e.to_string())?;
+            Ok(TableOutline {
+                document_id,
+                sheet,
+                row_count,
+                columns: columns.into_iter().map(|c| ColumnOutline { name: c.name, kind: c.kind }).collect(),
+            })
+        })
+        .collect()
+}
+
 /// Delete a document (ADR-0015): uploader or administrator only.
 ///
 /// Everything that decides and does the deletion is `delete_document()` in

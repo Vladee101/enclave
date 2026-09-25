@@ -72,6 +72,7 @@ pub fn run() {
             commands::auth::cmd_current_session,
             commands::documents::cmd_upload_document,
             commands::documents::cmd_list_documents,
+            commands::documents::cmd_list_document_tables,
             commands::documents::cmd_get_job_status,
             commands::documents::cmd_delete_document,
             commands::query::cmd_query,

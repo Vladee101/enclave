@@ -2,6 +2,7 @@ import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { useLlmStream, type ChosenPlan, type Clarification } from '../hooks/useLlmStream';
 import { Spinner } from '../components/Spinner';
+import { DocumentsPanel } from '../components/DocumentsPanel';
 
 interface SourceRef {
   document_id: string;
@@ -29,6 +30,39 @@ export function ChatPage() {
   const streamingId = useRef<number | null>(null);
   const nextId   = useRef(1);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const inputRef  = useRef<HTMLTextAreaElement>(null);
+
+  // Panel open/closed is a per-viewer convenience; storage may be
+  // unavailable, and then the panel simply starts open.
+  const [panelOpen, setPanelOpen] = useState<boolean>(() => {
+    try { return localStorage.getItem('enclave.docsPanel') !== 'closed'; } catch { return true; }
+  });
+  const togglePanel = () => setPanelOpen(prev => {
+    const next = !prev;
+    try { localStorage.setItem('enclave.docsPanel', next ? 'open' : 'closed'); } catch { /* ignore */ }
+    return next;
+  });
+
+  // A column name clicked in the panel goes in at the cursor, with spaces
+  // around it where needed, and the cursor lands after it.
+  const insertAtCursor = useCallback((text: string) => {
+    const el = inputRef.current;
+    setInput(prev => {
+      const start = el?.selectionStart ?? prev.length;
+      const end   = el?.selectionEnd ?? prev.length;
+      const before = prev.slice(0, start);
+      const after  = prev.slice(end);
+      const lead  = before && !/\s$/.test(before) ? ' ' : '';
+      const trail = after && !/^\s/.test(after) ? ' ' : '';
+      const next = before + lead + text + trail + after;
+      const caret = (before + lead + text + trail).length;
+      requestAnimationFrame(() => {
+        el?.focus();
+        el?.setSelectionRange(caret, caret);
+      });
+      return next;
+    });
+  }, []);
 
   const scrollBottom = () => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -80,6 +114,17 @@ export function ChatPage() {
   };
 
   return (
+    <div className="chat-page">
+    {panelOpen && <DocumentsPanel onInsert={insertAtCursor} />}
+    <button
+      type="button"
+      className="docs-panel-toggle"
+      onClick={togglePanel}
+      title={panelOpen ? 'Hide documents' : 'Show documents'}
+      aria-label={panelOpen ? 'Hide documents' : 'Show documents'}
+    >
+      {panelOpen ? '‹' : '›'}
+    </button>
     <div className="chat-layout">
       {/* ── Messages ── */}
       <div className="chat-messages">
@@ -156,6 +201,7 @@ export function ChatPage() {
       {/* ── Input bar ── */}
       <div className="chat-input-bar">
         <textarea
+          ref={inputRef}
           id="chat-input"
           className="chat-textarea"
           placeholder="Ask a question about your documents… (Enter to send, Shift+Enter for newline)"
@@ -179,6 +225,7 @@ export function ChatPage() {
           </svg>
         </button>
       </div>
+    </div>
     </div>
   );
 }
