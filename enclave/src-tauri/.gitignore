@@ -9,3 +9,6 @@
 # llama.cpp release (exe + DLLs, ~1.2 GB) unpacked by scripts/fetch-sidecar.ps1
 /binaries/llama/
 /target-tools/
+
+# Embedded PostgreSQL + pgvector (~61 MB) laid out by scripts/fetch-postgres.ps1 (ADR-0014)
+/binaries/pg/

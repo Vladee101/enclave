@@ -7,7 +7,6 @@ pub mod audit;
 pub mod session;
 pub mod tables;
 
-use anyhow::Context;
 use sqlx::PgPool;
 use tauri::Manager;
 use tracing::info;
@@ -43,7 +42,7 @@ pub fn run() {
 
             // Pool construction is async; block here so state is managed
             // before any command can be invoked (ADR-0008 hard invariant).
-            let (app_state, llm_client) =
+            let (app_state, llm_client, embedded_pg) =
                 tauri::async_runtime::block_on(init(&app_handle)).map_err(|e| {
                     Box::new(std::io::Error::new(
                         std::io::ErrorKind::Other,
@@ -54,6 +53,7 @@ pub fn run() {
             let ingest_pool = app_state.ingest_pool.clone();
             app.manage(app_state);
             app.manage(llm_client);
+            app.manage(embedded_pg);
             app.manage(session::Session::default());
 
             let app2 = app.handle().clone();
@@ -99,28 +99,75 @@ pub fn run() {
                         llm.shutdown();
                     }
                 }
+                // The app's own PostgreSQL, stopped cleanly so the next
+                // start needs no crash recovery (ADR-0014).
+                if let Some(pg) = app.try_state::<Option<db::embedded::EmbeddedPostgres>>() {
+                    if let Some(pg) = pg.inner() {
+                        pg.stop();
+                    }
+                }
             }
         });
 }
 
 /// Async init: connect both pools, run migrations, start LLM sidecar.
-async fn init(app: &tauri::AppHandle) -> anyhow::Result<(AppState, Option<llm::LlmClient>)> {
+type Initialised = (AppState, Option<llm::LlmClient>, Option<db::embedded::EmbeddedPostgres>);
+
+async fn init(app: &tauri::AppHandle) -> anyhow::Result<Initialised> {
     info!("Enclave starting up…");
 
-    let admin_url = std::env::var("ADMIN_DATABASE_URL")
-        .context("ADMIN_DATABASE_URL env var must be set")?;
-    let app_url = std::env::var("APP_DATABASE_URL")
-        .context("APP_DATABASE_URL env var must be set")?;
-    let ingest_url = std::env::var("INGEST_DATABASE_URL")
-        .context("INGEST_DATABASE_URL env var must be set")?;
+    // Where the database is (ADR-0014): all three role URLs set — an
+    // existing server (development, LAN deployments); none — the app's own
+    // embedded PostgreSQL. Some but not all is a mistake, not a mode.
+    let vars = ["ADMIN_DATABASE_URL", "APP_DATABASE_URL", "INGEST_DATABASE_URL"].map(|v| std::env::var(v).ok());
+    let (embedded, admin_url, app_url, ingest_url) = match vars {
+        [Some(admin), Some(app_url), Some(ingest)] => {
+            info!("Using the PostgreSQL server named by *_DATABASE_URL.");
+            (None, admin, app_url, ingest)
+        }
+        [None, None, None] => {
+            let pg = db::embedded::EmbeddedPostgres::start(app).await?;
+            let db::embedded::Urls { admin, app: app_url, ingest } = &pg.urls;
+            let urls = (admin.clone(), app_url.clone(), ingest.clone());
+            (Some(pg), urls.0, urls.1, urls.2)
+        }
+        _ => anyhow::bail!(
+            "Set all of ADMIN_DATABASE_URL, APP_DATABASE_URL and INGEST_DATABASE_URL to use an existing \
+             server, or none of them to use the embedded one"
+        ),
+    };
 
+    match connect(app, &embedded, &admin_url, &app_url, &ingest_url).await {
+        Ok((state, llm)) => Ok((state, llm, embedded)),
+        Err(e) => {
+            // Setup failed after our server started: do not leave it running.
+            if let Some(pg) = &embedded {
+                pg.stop();
+            }
+            Err(e)
+        }
+    }
+}
+
+async fn connect(
+    app: &tauri::AppHandle,
+    embedded: &Option<db::embedded::EmbeddedPostgres>,
+    admin_url: &str,
+    app_url: &str,
+    ingest_url: &str,
+) -> anyhow::Result<(AppState, Option<llm::LlmClient>)> {
     // Migrations run via the privileged role; app_user has no DDL access.
-    let admin_pool = db::connect_and_migrate(&admin_url).await?;
-    let app_pool   = db::build_pool(&app_url).await?;
+    let admin_pool = db::connect_and_migrate(admin_url).await?;
+    if let Some(pg) = embedded {
+        // Before the other pools connect: migration 004's fixed password
+        // must never be what they log in with.
+        pg.secure_roles(&admin_pool).await?;
+    }
+    let app_pool   = db::build_pool(app_url).await?;
     // Connects as ingest_worker (BYPASSRLS, non-superuser) — deliberately
     // never a clone of admin_pool. See migrations/005 and the module doc
     // on AppState above.
-    let ingest_pool = db::build_pool(&ingest_url).await?;
+    let ingest_pool = db::build_pool(ingest_url).await?;
 
     let llm_client = match llm::LlmClient::spawn(app, &admin_pool).await {
         Ok(client) => Some(client),

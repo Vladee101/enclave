@@ -50,6 +50,11 @@ pdf-extract = "0.12"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 quick-xml = "0.38"
 calamine = { version = "0.36", features = ["dates"] }
+# embedded PostgreSQL (ADR-0014): generated passwords, sealed with DPAPI
+getrandom = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
 
 [dev-dependencies]
 rust_xlsxwriter = "0.99.1"

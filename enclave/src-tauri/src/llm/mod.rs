@@ -23,6 +23,15 @@ pub mod adapters;
 const EMBEDDING_MODEL_NAME: &str = "nomic-embed-text-v1.5";
 const EMBEDDING_MODEL_DIMENSION: i32 = 768;
 
+/// The embedding sidecar's registration ($1 name, $2 dimension). Public so
+/// `tests/schema_contract.rs` runs it on a database built from migrations
+/// alone: it once named a column only hand-built databases had (016).
+pub const REGISTER_EMBEDDING_MODEL_SQL: &str = r#"
+    INSERT INTO embedding_models (name, dimension, provider, is_active)
+    VALUES ($1, $2, 'llama.cpp', true)
+    ON CONFLICT (name) DO UPDATE SET is_active = true, dimension = EXCLUDED.dimension
+"#;
+
 /// Resolve a model file to an absolute path and confirm it exists, so a
 /// missing file fails here with the path in the message instead of as a
 /// silent sidecar exit and a 60-second health-check timeout.
@@ -51,7 +60,7 @@ fn model_path(app: &AppHandle, file_name: &str) -> Result<String> {
 /// finds nothing — so the exe is run in place, from this directory.
 ///
 /// Resolution: `ENCLAVE_LLAMA_DIR`, then `{resource_dir}/llama` (installed
-/// app; bundling it is part of the open packaging decision, ADR-0014), then
+/// app; to be bundled like the embedded PostgreSQL, ADR-0014), then
 /// `src-tauri/binaries/llama` in debug builds, where `fetch-sidecar.ps1`
 /// unpacks the release.
 fn llama_server_exe(app: &AppHandle) -> Result<PathBuf> {
@@ -303,13 +312,7 @@ impl LlmClient {
         // re-registering on restart doesn't leave two active rows.
         let mut tx = pool.begin().await?;
         sqlx::query("UPDATE embedding_models SET is_active = false").execute(&mut *tx).await?;
-        sqlx::query(
-            r#"
-            INSERT INTO embedding_models (name, dimension, provider, is_active)
-            VALUES ($1, $2, 'llama.cpp', true)
-            ON CONFLICT (name) DO UPDATE SET is_active = true, dimension = EXCLUDED.dimension
-            "#,
-        )
+        sqlx::query(REGISTER_EMBEDDING_MODEL_SQL)
         .bind(EMBEDDING_MODEL_NAME)
         .bind(EMBEDDING_MODEL_DIMENSION)
         .execute(&mut *tx)

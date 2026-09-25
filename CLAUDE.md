@@ -172,10 +172,17 @@ implementation.
   role and what that obligates (department_id stamping). Extends ADR-0008.
 - **0013 — Content-addressed blob storage.** The `{blob_root}/{file_hash}` store
   and the dedup it enables.
-- ~~**0014 — PostgreSQL distribution.**~~ Decided (ADR-0014): the app ships a
-  trimmed PostgreSQL 18 + self-built pgvector (61 MB) and runs it itself —
-  `postgres.exe` spawned without a console, 127.0.0.1 on a free port,
-  generated passwords. Implementation pending.
+- ~~**0014 — PostgreSQL distribution.**~~ Decided and implemented
+  (ADR-0014, `db/embedded.rs`, `scripts/fetch-postgres.ps1`): with no
+  `*_DATABASE_URL` set the app runs a trimmed PostgreSQL 18 + self-built
+  pgvector itself — `postgres.exe` spawned without a console, 127.0.0.1 on
+  a free port, generated role passwords sealed with DPAPI. Still open:
+  bundling it into the installer, a clean-machine check.
+- **The schema is what the migrations build.** The dev database was once
+  hand-built from `db/schema.sql` and still has columns no migration
+  creates; code that relies on one works there and fails on every new
+  install (it happened: `embedding_models.provider`, fixed by 016). A
+  statement the app runs at startup belongs in `tests/schema_contract.rs`.
 - (Also note, not necessarily an ADR) the `token_count` chars/4 heuristic is a
   deliberate simplification, commented in-line; revisit if it bites. Ingestion
   retries are no longer a simplification: transient (HTTP) failures are

@@ -1094,6 +1094,7 @@ dependencies = [
  "calamine",
  "chrono",
  "futures",
+ "getrandom 0.3.4",
  "pdf-extract",
  "quick-xml 0.38.4",
  "reqwest 0.12.28",
@@ -1112,6 +1113,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "windows-sys 0.61.2",
  "zip",
 ]
 

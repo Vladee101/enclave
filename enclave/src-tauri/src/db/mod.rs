@@ -2,6 +2,7 @@ use anyhow::Context;
 use sqlx::PgPool;
 use tracing::info;
 
+pub mod embedded;
 pub mod rls;
 
 /// Build a connection pool without running migrations.

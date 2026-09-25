@@ -14,13 +14,20 @@ jobs:
   # (ADR-0008), deletion rules (ADR-0015/0017) and least privilege
   # (ADR-0018) hold. A failure here is a release blocker (CLAUDE.md).
   rust:
-    name: Rust tests + RLS validation
+    name: Rust tests + RLS validation (PostgreSQL ${{ matrix.postgres }})
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 
+    # 16: the minimum for an existing server (LAN, development); 18: the
+    # version the app ships and runs itself (ADR-0014).
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ["16", "18"]
+
     services:
       postgres:
-        image: pgvector/pgvector:pg16
+        image: pgvector/pgvector:pg${{ matrix.postgres }}
         env:
           POSTGRES_PASSWORD: postgres
         ports:
