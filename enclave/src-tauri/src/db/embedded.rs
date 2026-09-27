@@ -15,6 +15,9 @@
 //!    password migration 004 gives `enclave_app` and `ingest_worker`.
 //! 4. On exit, `stop`: `pg_ctl stop -m fast` (a checkpoint, ~2 s), not a
 //!    kill, so the next start needs no crash recovery.
+//!
+//! A restore from a backup (ADR-0026) is staged while the app runs and
+//! swapped in by `start`, before anything connects to the database.
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -28,7 +31,7 @@ use tauri::{AppHandle, Manager};
 use tracing::{info, warn};
 
 /// The database the app's roles connect to.
-const DATABASE: &str = "enclave";
+pub(crate) const DATABASE: &str = "enclave";
 
 /// How long a starting server gets before startup is abandoned.
 const START_TIMEOUT: Duration = Duration::from_secs(60);
@@ -57,9 +60,13 @@ struct Secrets {
 pub struct EmbeddedPostgres {
     bin:     PathBuf,
     data:    PathBuf,
+    port:    u16,
     secrets: Secrets,
     child:   Mutex<Option<Child>>,
     pub urls: Urls,
+    /// The backup swapped in by this start, if one was staged (ADR-0026);
+    /// recorded in the audit log once the pools are up.
+    pub restored: Option<crate::backup::Staged>,
 }
 
 /// 24 random bytes as hex: URL-safe, no quoting anywhere.
@@ -96,8 +103,14 @@ fn pg_dir(app: &AppHandle) -> Result<PathBuf> {
         })
 }
 
+/// The `bin` directory of the bundled PostgreSQL. Backups use its
+/// `pg_dump` in server mode too (ADR-0026).
+pub fn tools_dir(app: &AppHandle) -> Result<PathBuf> {
+    Ok(pg_dir(app)?.join("bin"))
+}
+
 /// A command for a PostgreSQL tool that opens no console window.
-fn tool(bin: &Path, name: &str) -> Command {
+pub(crate) fn tool(bin: &Path, name: &str) -> Command {
     let exe = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
     #[allow(unused_mut)]
     let mut cmd = Command::new(bin.join(exe));
@@ -260,9 +273,13 @@ impl EmbeddedPostgres {
         let url = |user: &str, password: &str, db: &str| format!("postgres://{user}:{password}@127.0.0.1:{port}/{db}");
         wait_ready(&mut child, port, &url("postgres", &secrets.superuser, "postgres")).await?;
 
+        let maintenance = sqlx::PgPool::connect(&url("postgres", &secrets.superuser, "postgres")).await?;
+        // A restore staged in the previous session replaces the database
+        // now, while nothing is connected to it.
+        let restored = crate::backup::apply_staged(&maintenance, &root).await?;
+
         // The database itself, on first run (CREATE DATABASE cannot run in
         // a transaction, so not in a migration).
-        let maintenance = sqlx::PgPool::connect(&url("postgres", &secrets.superuser, "postgres")).await?;
         let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")
             .bind(DATABASE)
             .fetch_one(&maintenance)
@@ -279,7 +296,15 @@ impl EmbeddedPostgres {
             ingest: url("ingest_worker", &secrets.ingest, DATABASE),
         };
         info!("Embedded PostgreSQL ready on 127.0.0.1:{port}.");
-        Ok(Self { bin, data, secrets, child: Mutex::new(Some(child)), urls })
+        Ok(Self { bin, data, port, secrets, child: Mutex::new(Some(child)), urls, restored })
+    }
+
+    /// This server, as a restore is staged on it (ADR-0026).
+    pub fn cluster(&self) -> crate::backup::Cluster {
+        crate::backup::Cluster {
+            bin:  self.bin.clone(),
+            base: format!("postgres://postgres:{}@127.0.0.1:{}/", self.secrets.superuser, self.port),
+        }
     }
 
     /// Give the login roles their generated passwords. Migration 004

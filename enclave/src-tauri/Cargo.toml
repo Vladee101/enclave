@@ -52,6 +52,11 @@ quick-xml = "0.38"
 calamine = { version = "0.36", features = ["dates"] }
 # embedded PostgreSQL (ADR-0014): generated passwords, sealed with DPAPI
 getrandom = "0.3"
+# backups (ADR-0026): the save/open dialogs; the database URL split so the
+# password reaches pg_dump through its environment, not its command line
+tauri-plugin-dialog = "~2.7"   # the npm package must match major.minor
+url = "2"
+percent-encoding = "2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }

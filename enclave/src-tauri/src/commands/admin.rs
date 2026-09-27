@@ -74,7 +74,7 @@ fn slugify(name: &str) -> String {
 /// command must call it before doing anything else. The flag is read from
 /// the database on every call, not from the session, so a demotion applies
 /// immediately.
-async fn require_admin(state: &State<'_, AppState>, session: &State<'_, Session>) -> Result<Uuid, String> {
+pub(crate) async fn require_admin(state: &State<'_, AppState>, session: &State<'_, Session>) -> Result<Uuid, String> {
     let user_id = session.require()?.id;
     let is_admin: Option<bool> = sqlx::query_scalar("SELECT is_admin FROM users WHERE id = $1")
         .bind(user_id)

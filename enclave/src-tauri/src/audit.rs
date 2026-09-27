@@ -16,6 +16,8 @@ pub mod event {
     pub const DOCUMENT_UPLOADED:  &str = "document_uploaded";
     pub const DOCUMENT_DELETED:   &str = "document_deleted";
     pub const QUERY:              &str = "query";
+    pub const BACKUP_CREATED:     &str = "backup_created";
+    pub const BACKUP_RESTORED:    &str = "backup_restored";
 }
 
 /// Append one row to `audit_log` (FR14).

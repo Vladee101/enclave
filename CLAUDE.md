@@ -6,7 +6,7 @@
 ## What this file is
 
 A build brief for the coding agent. **The source of truth for *why* is
-`docs/adr/`** — twenty-three accepted Architecture Decision Records (0001–0010, 0014–0025; 0011 superseded by 0021). This file says *what
+`docs/adr/`** — twenty-four accepted Architecture Decision Records (0001–0010, 0014–0026; 0011 superseded by 0021). This file says *what
 to build, in what order, and which invariants must never be broken.* When a
 decision here seems arbitrary, the matching ADR explains it. Do not contradict
 an ADR; if reality forces a change, write a new ADR that supersedes the old one
@@ -176,8 +176,15 @@ implementation.
   (ADR-0014, `db/embedded.rs`, `scripts/fetch-postgres.ps1`): with no
   `*_DATABASE_URL` set the app runs a trimmed PostgreSQL 18 + self-built
   pgvector itself — `postgres.exe` spawned without a console, 127.0.0.1 on
-  a free port, generated role passwords sealed with DPAPI. Still open:
-  bundling it into the installer, a clean-machine check.
+  a free port, generated role passwords sealed with DPAPI. The NSIS
+  installer (`scripts/build-installer.ps1`) carries it. Still open: a
+  clean-machine check.
+- **Backups (ADR-0026).** A backup is one archive: `pg_dump` of one
+  exported snapshot plus every live document's blob, each entry checked
+  by SHA-256. A restore never touches live data while the app runs: it is
+  checked, restored into `enclave_restore`, migrated, then swapped in by
+  `backup::apply_staged` at the next start, before any pool connects.
+  Embedded database only.
 - **The schema is what the migrations build.** The dev database was once
   hand-built from `db/schema.sql` and still has columns no migration
   creates; code that relies on one works there and fails on every new

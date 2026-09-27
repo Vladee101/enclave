@@ -5,6 +5,7 @@ import { Badge } from '../components/Badge';
 import { Button } from '../components/Button';
 import { FormField } from '../components/FormField';
 import { ErrorText } from '../components/ErrorText';
+import { BackupCard } from '../components/BackupCard';
 
 interface Dept    { id: string; name: string; is_default: boolean; member_count: number; document_count: number; }
 interface Adapter { id: string; department_id: string; adapter_path: string; scale: number; is_active: boolean; }
@@ -330,6 +331,9 @@ export function AdminPage() {
           </FormField>
         </form>
       </div>
+
+      {/* ── Backup ── */}
+      <BackupCard />
 
       {/* ── Audit log ── */}
       <div className="card">

@@ -946,3 +946,13 @@ code, .mono {
 .model-setup-import .input { font-size: 12px; padding: 6px 9px; }
 
 .model-setup-error { color: var(--error); font-size: 12px; word-break: break-word; }
+
+/* ── Backup (ADR-0026) ── */
+.backup-staged {
+  padding: 12px 14px;
+  border: 1px solid var(--warning);
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.08);
+  font-size: 13px;
+}
+.backup-warning { color: var(--warning); }

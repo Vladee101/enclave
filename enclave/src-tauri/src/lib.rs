@@ -4,6 +4,7 @@ pub mod llm;
 pub mod retrieval;
 pub mod commands;
 pub mod audit;
+pub mod backup;
 pub mod session;
 pub mod tables;
 
@@ -25,6 +26,12 @@ pub struct AppState {
     pub ingest_pool: PgPool,
 }
 
+/// The privileged role's connection string, for `pg_dump` (ADR-0026) —
+/// the one thing a pool cannot hand back.
+pub struct DatabaseUrls {
+    pub admin: String,
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt()
@@ -37,12 +44,13 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let app_handle = app.handle().clone();
 
             // Pool construction is async; block here so state is managed
             // before any command can be invoked (ADR-0008 hard invariant).
-            let (app_state, llm_client, embedded_pg) =
+            let (app_state, llm_client, embedded_pg, urls) =
                 tauri::async_runtime::block_on(init(&app_handle)).map_err(|e| {
                     Box::new(std::io::Error::new(
                         std::io::ErrorKind::Other,
@@ -54,6 +62,8 @@ pub fn run() {
             app.manage(app_state);
             app.manage(llm_client);
             app.manage(embedded_pg);
+            app.manage(urls);
+            app.manage(commands::backup::BackupBusy::default());
             app.manage(session::Session::default());
             app.manage(commands::models::ModelDownloads::default());
 
@@ -92,6 +102,11 @@ pub fn run() {
             commands::models::cmd_download_models,
             commands::models::cmd_import_model,
             commands::models::cmd_restart_app,
+            commands::backup::cmd_backup_create,
+            commands::backup::cmd_backup_inspect,
+            commands::backup::cmd_backup_restore,
+            commands::backup::cmd_backup_staged,
+            commands::backup::cmd_backup_cancel_restore,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -116,7 +131,7 @@ pub fn run() {
 }
 
 /// Async init: connect both pools, run migrations, start LLM sidecar.
-type Initialised = (AppState, Option<llm::LlmClient>, Option<db::embedded::EmbeddedPostgres>);
+type Initialised = (AppState, Option<llm::LlmClient>, Option<db::embedded::EmbeddedPostgres>, DatabaseUrls);
 
 async fn init(app: &tauri::AppHandle) -> anyhow::Result<Initialised> {
     info!("Enclave starting up…");
@@ -143,7 +158,7 @@ async fn init(app: &tauri::AppHandle) -> anyhow::Result<Initialised> {
     };
 
     match connect(app, &embedded, &admin_url, &app_url, &ingest_url).await {
-        Ok((state, llm)) => Ok((state, llm, embedded)),
+        Ok((state, llm)) => Ok((state, llm, embedded, DatabaseUrls { admin: admin_url })),
         Err(e) => {
             // Setup failed after our server started: do not leave it running.
             if let Some(pg) = &embedded {
@@ -167,6 +182,23 @@ async fn connect(
         // Before the other pools connect: migration 004's fixed password
         // must never be what they log in with.
         pg.secure_roles(&admin_pool).await?;
+        if let Some(staged) = &pg.restored {
+            // Recorded in the restored database's own log; the one it
+            // replaced is gone.
+            let mut conn = admin_pool.acquire().await?;
+            audit::record(
+                &mut conn,
+                None,
+                None,
+                audit::event::BACKUP_RESTORED,
+                serde_json::json!({
+                    "backup_created_at": staged.manifest.created_at,
+                    "documents": staged.manifest.counts.documents,
+                    "staged_by": staged.staged_by,
+                }),
+            )
+            .await?;
+        }
     }
     let app_pool   = db::build_pool(app_url).await?;
     // Connects as ingest_worker (BYPASSRLS, non-superuser) — deliberately
