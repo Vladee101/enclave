@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useAuth } from '../contexts/AuthContext';
+import { useI18n, type TFunc } from '../i18n';
 import { useJobPoller } from '../hooks/useJobPoller';
 import { Badge } from '../components/Badge';
 import { Spinner } from '../components/Spinner';
@@ -23,14 +24,27 @@ interface JobStatus {
   error_text:  string | null;
 }
 
-const STATUS_BADGE: Record<string, { cls: string; label: string }> = {
-  pending:   { cls: 'badge-warning', label: 'Pending' },
-  ready:     { cls: 'badge-success', label: 'Ready' },
-  failed:    { cls: 'badge-error',   label: 'Failed' },
-  queued:    { cls: 'badge-info',    label: 'Queued' },
-  running:   { cls: 'badge-info',    label: 'Ingesting…' },
-  succeeded: { cls: 'badge-success', label: 'Done' },
+// Badge classes per status; the label is translated at render time (i18n).
+const STATUS_CLS: Record<string, string> = {
+  pending:   'badge-warning',
+  ready:     'badge-success',
+  failed:    'badge-error',
+  queued:    'badge-info',
+  running:   'badge-info',
+  succeeded: 'badge-success',
 };
+
+function statusLabel(t: TFunc, status: string): string {
+  switch (status) {
+    case 'pending':   return t('documents.statusPending');
+    case 'ready':     return t('documents.statusReady');
+    case 'failed':    return t('documents.statusFailed');
+    case 'queued':    return t('documents.statusQueued');
+    case 'running':   return t('documents.statusIngesting');
+    case 'succeeded': return t('documents.statusDone');
+    default:          return status;
+  }
+}
 
 function docIcon(filename: string): string {
   const ext = filename.split('.').pop()?.toLowerCase() ?? '';
@@ -61,12 +75,13 @@ function defaultTarget(depts: Dept[]): string {
 }
 
 /** The shared department is visible to every user — say so wherever it is chosen. */
-function deptLabel(d: Dept): string {
-  return d.is_default ? `${d.name} (visible to everyone)` : d.name;
+function deptLabel(d: Dept, t: TFunc): string {
+  return d.is_default ? `${d.name}${t('documents.sharedSuffix')}` : d.name;
 }
 
 export function DocumentsPage() {
   const { user } = useAuth();
+  const { t } = useI18n();
   const [docs,        setDocs]    = useState<DocInfo[]>([]);
   const [pendingJobs, setPending] = useState<Record<string, string>>({});  // doc_id → job_id
   const [dragOver,    setDragOver] = useState(false);
@@ -129,12 +144,12 @@ export function DocumentsPage() {
       setPending(prev => ({ ...prev, [job.document_id]: job.job_id }));
       track(job.job_id);
     } catch (e) {
-      setError(`Upload of "${file.name}" failed: ${e}`);
+      setError(t('documents.uploadFailed', { name: file.name, error: String(e) }));
     }
   }
 
   async function remove(doc: DocInfo) {
-    if (!window.confirm(`Delete "${doc.filename}"? Its text is removed from search immediately; this cannot be undone.`)) return;
+    if (!window.confirm(t('documents.deleteConfirmTitle', { name: doc.filename }) + '\n\n' + t('documents.deleteConfirmBody'))) return;
     setError(null);
     try {
       await invoke('cmd_delete_document', { documentId: doc.id });
@@ -147,7 +162,7 @@ export function DocumentsPage() {
   function handleFiles(files: FileList | null) {
     if (!files || files.length === 0) return;
     if (!deptId) {
-      setError('Choose the department to upload to first.');
+      setError(t('documents.chooseDeptError'));
       return;
     }
     setError(null);
@@ -156,13 +171,16 @@ export function DocumentsPage() {
 
   const target = depts.find(d => d.id === deptId);
 
-  function resolveStatus(doc: DocInfo): { cls: string; label: string } {
+  function resolveStatus(doc: DocInfo): { cls: string; label: string; running: boolean } {
+    // A live job knows better; an unknown job status falls back to the doc's.
     const jobId = pendingJobs[doc.id];
-    if (jobId && jobs[jobId]) {
-      const j = jobs[jobId];
-      return STATUS_BADGE[j.status] ?? STATUS_BADGE[doc.status];
-    }
-    return STATUS_BADGE[doc.status] ?? { cls: 'badge-muted', label: doc.status };
+    const jstatus = jobId ? jobs[jobId]?.status : undefined;
+    const status = jstatus && STATUS_CLS[jstatus] ? jstatus : doc.status;
+    return {
+      cls:     STATUS_CLS[status] ?? 'badge-muted',
+      label:   statusLabel(t, status),
+      running: status === 'running',
+    };
   }
 
   return (
@@ -171,18 +189,18 @@ export function DocumentsPage() {
           target is always spelled out in the upload zone below. */}
       {depts.length > 1 && (
       <div className="flex items-center gap-3" style={{ marginBottom: 12 }}>
-        <span className="text-sm text-muted">Upload to:</span>
+        <span className="text-sm text-muted">{t('documents.uploadTo')}</span>
         <select
           id="dept-select"
-          aria-label="Upload to department"
+          aria-label={t('documents.uploadToAria')}
           className="input"
           style={{ width: 'auto' }}
           value={deptId}
           onChange={e => { setDeptId(e.target.value); setError(null); }}
         >
-          <option value="" disabled>Choose a department…</option>
+          <option value="" disabled>{t('documents.chooseDept')}</option>
           {depts.map(d => (
-            <option key={d.id} value={d.id}>{deptLabel(d)}</option>
+            <option key={d.id} value={d.id}>{deptLabel(d, t)}</option>
           ))}
         </select>
       </div>
@@ -192,22 +210,22 @@ export function DocumentsPage() {
       <div
         className={`drop-zone${dragOver ? ' drag-over' : ''}`}
         style={{ marginBottom: 24, opacity: target ? 1 : 0.6 }}
-        onClick={() => (target ? fileInputRef.current?.click() : setError('Choose the department to upload to first.'))}
+        onClick={() => (target ? fileInputRef.current?.click() : setError(t('documents.chooseDeptError')))}
         onDragOver={e => { e.preventDefault(); setDragOver(true); }}
         onDragLeave={() => setDragOver(false)}
         onDrop={e => { e.preventDefault(); setDragOver(false); handleFiles(e.dataTransfer.files); }}
         role="button"
         tabIndex={0}
-        aria-label={target ? `Upload documents to ${target.name}` : 'Choose a department first'}
+        aria-label={target ? t('documents.uploadToNameAria', { name: target.name }) : t('documents.chooseFirstAria')}
       >
         <div className="drop-zone-icon">📂</div>
         <div className="drop-zone-text">
-          {target ? <>Drop documents here to upload to <strong>{deptLabel(target)}</strong></> : 'Choose a department above first'}
+          {target ? <>{t('documents.dropZoneIntro')} <strong>{deptLabel(target, t)}</strong></> : t('documents.chooseAbove')}
         </div>
-        <div className="drop-zone-hint">PDF, DOCX, XLSX / XLS / ODS, TXT, MD — all stored locally</div>
+        <div className="drop-zone-hint">{t('documents.dropZoneHint')}</div>
         <input
           id="file-input"
-          aria-label="Choose files to upload"
+          aria-label={t('documents.chooseFilesAria')}
           ref={fileInputRef}
           type="file"
           style={{ display: 'none' }}
@@ -223,7 +241,7 @@ export function DocumentsPage() {
       <div className="doc-grid">
         {docs.length === 0 && (
           <div className="card" style={{ textAlign: 'center', color: 'var(--text-secondary)', padding: 32 }}>
-            No documents yet. Upload one above.
+            {t('documents.noDocuments')}
           </div>
         )}
         {docs.map(doc => {
@@ -234,16 +252,16 @@ export function DocumentsPage() {
               <div className="doc-meta">
                 <div className="doc-name">{doc.filename}</div>
                 <div className="doc-info">
-                  {(() => { const d = depts.find(d => d.id === doc.department_id); return d ? deptLabel(d) : 'Unknown dept'; })()}
+                  {(() => { const d = depts.find(d => d.id === doc.department_id); return d ? deptLabel(d, t) : t('documents.unknownDept'); })()}
                 </div>
               </div>
               <Badge cls={badge.cls}>
-                {badge.label === 'Ingesting…' && <Spinner size={10} borderWidth={1.5} />}
+                {badge.running && <Spinner size={10} borderWidth={1.5} />}
                 {badge.label}
               </Badge>
               {doc.can_delete && (
-                <Button variant="ghost" onClick={() => remove(doc)} aria-label={`Delete ${doc.filename}`}>
-                  Delete
+                <Button variant="ghost" onClick={() => remove(doc)} aria-label={t('documents.deleteAria', { name: doc.filename })}>
+                  {t('common.delete')}
                 </Button>
               )}
             </div>

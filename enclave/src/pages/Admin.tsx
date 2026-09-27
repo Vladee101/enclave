@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useAuth } from '../contexts/AuthContext';
+import { useI18n } from '../i18n';
 import { Badge } from '../components/Badge';
 import { Button } from '../components/Button';
 import { FormField } from '../components/FormField';
@@ -22,6 +23,7 @@ interface AuditEntry {
 
 export function AdminPage() {
   const { user } = useAuth();
+  const { t, tPlural, formatDateTime } = useI18n();
   const [depts,     setDepts]     = useState<Dept[]>([]);
   const [adapters,  setAdapters]  = useState<Adapter[]>([]);
   const [newDept,   setNewDept]   = useState('');
@@ -62,11 +64,12 @@ export function AdminPage() {
   useEffect(() => { load(); }, [user]);
 
   async function deleteDept(d: Dept) {
-    const docs = d.document_count === 1 ? '1 document' : `${d.document_count} documents`;
-    const members = d.member_count === 1 ? '1 membership' : `${d.member_count} memberships`;
     if (!window.confirm(
-      `Delete department "${d.name}" together with its ${docs} and ${members}?\n\n` +
-      'The documents\' text is removed from search immediately. Users stay, in their other departments. This cannot be undone.',
+      t('admin.deleteDeptConfirmTitle', {
+        name:     d.name,
+        docs:     tPlural('admin.nDocuments', d.document_count),
+        members:  tPlural('admin.nMemberships', d.member_count),
+      }) + '\n\n' + t('admin.deleteDeptConfirmBody'),
     )) return;
     setError(null);
     try {
@@ -131,9 +134,9 @@ export function AdminPage() {
       <div className="card">
         <div className="flex justify-between items-center" style={{ marginBottom: 16 }}>
           <div>
-            <div style={{ fontWeight: 600, fontSize: 15 }}>Departments</div>
+            <div style={{ fontWeight: 600, fontSize: 15 }}>{t('admin.departments')}</div>
             <div className="text-sm text-muted" style={{ marginTop: 2 }}>
-              Each department can have its own documents and LoRA adapter. New profiles join only the default department; add them to others under Members.
+              {t('admin.departmentsDesc')}
             </div>
           </div>
         </div>
@@ -144,9 +147,9 @@ export function AdminPage() {
           <table className="admin-table" style={{ marginBottom: 20 }}>
             <thead>
               <tr>
-                <th>Name</th>
-                <th>Members</th>
-                <th>Documents</th>
+                <th>{t('admin.thName')}</th>
+                <th>{t('admin.members')}</th>
+                <th>{t('nav.documents')}</th>
                 <th></th>
               </tr>
             </thead>
@@ -155,14 +158,14 @@ export function AdminPage() {
                 <tr key={d.id}>
                   <td style={{ fontWeight: 500 }}>
                     {d.name}
-                    {d.is_default && <> <Badge cls="badge-info">default · everyone</Badge></>}
+                    {d.is_default && <> <Badge cls="badge-info">{t('admin.defaultBadge')}</Badge></>}
                   </td>
                   <td>{d.member_count}</td>
                   <td>{d.document_count}</td>
                   <td style={{ textAlign: 'right' }}>
                     {!d.is_default && (
-                      <Button variant="ghost" onClick={() => deleteDept(d)} aria-label={`Delete department ${d.name}`}>
-                        Delete
+                      <Button variant="ghost" onClick={() => deleteDept(d)} aria-label={t('admin.deleteDeptAria', { name: d.name })}>
+                        {t('common.delete')}
                       </Button>
                     )}
                   </td>
@@ -177,13 +180,13 @@ export function AdminPage() {
             id="new-dept-name"
             type="text"
             className="input"
-            placeholder="New department name…"
+            placeholder={t('admin.newDeptName')}
             value={newDept}
             onChange={e => setNewDept(e.target.value)}
             required
           />
           <Button id="create-dept-btn" type="submit" loading={saving} spinnerSize={14} style={{ flexShrink: 0 }}>
-            + Add
+            {t('common.add')}
           </Button>
         </form>
       </div>
@@ -191,9 +194,9 @@ export function AdminPage() {
       {/* ── Members ── */}
       <div className="card">
         <div style={{ marginBottom: 16 }}>
-          <div style={{ fontWeight: 600, fontSize: 15 }}>Members</div>
+          <div style={{ fontWeight: 600, fontSize: 15 }}>{t('admin.members')}</div>
           <div className="text-sm text-muted" style={{ marginTop: 2 }}>
-            Membership is what RLS checks on every query (ADR-0008): a change applies to the member's next request.
+            {t('admin.membersDesc')}
           </div>
         </div>
 
@@ -201,8 +204,8 @@ export function AdminPage() {
           <table className="admin-table" style={{ marginBottom: 20 }}>
             <thead>
               <tr>
-                <th>Department</th>
-                <th>User</th>
+                <th>{t('admin.department')}</th>
+                <th>{t('admin.user')}</th>
                 <th></th>
               </tr>
             </thead>
@@ -212,7 +215,7 @@ export function AdminPage() {
                   <td style={{ fontWeight: 500 }}>{m.department_name}</td>
                   <td>{m.username}</td>
                   <td style={{ textAlign: 'right' }}>
-                    <Button variant="ghost" onClick={() => removeMember(m)}>Remove</Button>
+                    <Button variant="ghost" onClick={() => removeMember(m)}>{t('admin.remove')}</Button>
                   </td>
                 </tr>
               ))}
@@ -221,10 +224,10 @@ export function AdminPage() {
         )}
 
         <form onSubmit={addMember} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: 10, alignItems: 'end' }}>
-          <FormField label="User" htmlFor="member-user" style={{ marginBottom: 0 }}>
+          <FormField label={t('admin.user')} htmlFor="member-user" style={{ marginBottom: 0 }}>
             <select
               id="member-user"
-              aria-label="User"
+              aria-label={t('admin.user')}
               className="input"
               value={memberForm.user_id}
               onChange={e => setMemberForm(p => ({ ...p, user_id: e.target.value }))}
@@ -233,10 +236,10 @@ export function AdminPage() {
               {users.map(u => <option key={u.id} value={u.id}>{u.username}</option>)}
             </select>
           </FormField>
-          <FormField label="Department" htmlFor="member-dept" style={{ marginBottom: 0 }}>
+          <FormField label={t('admin.department')} htmlFor="member-dept" style={{ marginBottom: 0 }}>
             <select
               id="member-dept"
-              aria-label="Department"
+              aria-label={t('admin.department')}
               className="input"
               value={memberForm.department_id}
               onChange={e => setMemberForm(p => ({ ...p, department_id: e.target.value }))}
@@ -246,7 +249,7 @@ export function AdminPage() {
             </select>
           </FormField>
           <Button id="add-member-btn" type="submit" loading={saving} spinnerSize={14} style={{ flexShrink: 0 }}>
-            + Add
+            {t('common.add')}
           </Button>
         </form>
       </div>
@@ -254,10 +257,9 @@ export function AdminPage() {
       {/* ── LoRA Adapters ── */}
       <div className="card">
         <div style={{ marginBottom: 16 }}>
-          <div style={{ fontWeight: 600, fontSize: 15 }}>LoRA Adapters</div>
+          <div style={{ fontWeight: 600, fontSize: 15 }}>{t('admin.adapters')}</div>
           <div className="text-sm text-muted" style={{ marginTop: 2 }}>
-            Per-department adapters are hot-swapped per request (ADR-0003, 0004).
-            Place <code>.gguf</code> adapter files in <code>binaries/adapters/</code>.
+            {t('admin.adaptersDescPre')} <code>.gguf</code> {t('admin.adaptersDescMid')} <code>binaries/adapters/</code>{t('admin.adaptersDescPost')}
           </div>
         </div>
 
@@ -265,10 +267,10 @@ export function AdminPage() {
           <table className="admin-table" style={{ marginBottom: 20 }}>
             <thead>
               <tr>
-                <th>Department</th>
-                <th>Adapter path</th>
-                <th>Scale</th>
-                <th>Active</th>
+                <th>{t('admin.department')}</th>
+                <th>{t('admin.thAdapterPath')}</th>
+                <th>{t('admin.thScale')}</th>
+                <th>{t('admin.thActive')}</th>
               </tr>
             </thead>
             <tbody>
@@ -279,7 +281,7 @@ export function AdminPage() {
                   <td>{a.scale.toFixed(2)}</td>
                   <td>
                     <Badge cls={a.is_active ? 'badge-success' : 'badge-muted'}>
-                      {a.is_active ? 'Active' : 'Off'}
+                      {a.is_active ? t('admin.active') : t('admin.off')}
                     </Badge>
                   </td>
                 </tr>
@@ -289,10 +291,10 @@ export function AdminPage() {
         )}
 
         <form onSubmit={addAdapter} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: 10 }}>
-          <FormField label="Department" htmlFor="adapter-dept" style={{ marginBottom: 0 }}>
+          <FormField label={t('admin.department')} htmlFor="adapter-dept" style={{ marginBottom: 0 }}>
             <select
               id="adapter-dept"
-              aria-label="Department"
+              aria-label={t('admin.department')}
               className="input"
               value={adapterForm.department_id}
               onChange={e => setAdapterForm(p => ({ ...p, department_id: e.target.value }))}
@@ -301,7 +303,7 @@ export function AdminPage() {
               {depts.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
             </select>
           </FormField>
-          <FormField label="Adapter path" htmlFor="adapter-path" style={{ marginBottom: 0 }}>
+          <FormField label={t('admin.thAdapterPath')} htmlFor="adapter-path" style={{ marginBottom: 0 }}>
             <input
               id="adapter-path"
               type="text"
@@ -312,11 +314,11 @@ export function AdminPage() {
               required
             />
           </FormField>
-          <FormField label="Scale" htmlFor="adapter-scale" style={{ marginBottom: 0 }}>
+          <FormField label={t('admin.thScale')} htmlFor="adapter-scale" style={{ marginBottom: 0 }}>
             <div className="flex gap-2 items-center">
               <input
                 id="adapter-scale"
-                aria-label="Scale"
+                aria-label={t('admin.thScale')}
                 type="number"
                 min="0" max="2" step="0.1"
                 className="input"
@@ -325,7 +327,7 @@ export function AdminPage() {
                 onChange={e => setAdapterForm(p => ({ ...p, scale: e.target.value }))}
               />
               <Button id="add-adapter-btn" type="submit" loading={saving} spinnerSize={14} style={{ flexShrink: 0 }}>
-                + Add
+                {t('common.add')}
               </Button>
             </div>
           </FormField>
@@ -338,28 +340,28 @@ export function AdminPage() {
       {/* ── Audit log ── */}
       <div className="card">
         <div style={{ marginBottom: 16 }}>
-          <div style={{ fontWeight: 600, fontSize: 15 }}>Audit log</div>
+          <div style={{ fontWeight: 600, fontSize: 15 }}>{t('admin.auditLog')}</div>
           <div className="text-sm text-muted" style={{ marginTop: 2 }}>
-            Last 100 events. Queries are logged by the documents and chunks they cited, not by their text.
+            {t('admin.auditDesc')}
           </div>
         </div>
         {audit.length === 0 ? (
-          <div className="text-sm text-muted">No events yet.</div>
+          <div className="text-sm text-muted">{t('admin.noEvents')}</div>
         ) : (
           <table className="admin-table">
             <thead>
               <tr>
-                <th>Time</th>
-                <th>User</th>
-                <th>Event</th>
-                <th>Department</th>
-                <th>Details</th>
+                <th>{t('admin.thTime')}</th>
+                <th>{t('admin.user')}</th>
+                <th>{t('admin.thEvent')}</th>
+                <th>{t('admin.department')}</th>
+                <th>{t('admin.thDetails')}</th>
               </tr>
             </thead>
             <tbody>
               {audit.map(e => (
                 <tr key={e.id}>
-                  <td style={{ whiteSpace: 'nowrap' }}>{new Date(e.created_at).toLocaleString()}</td>
+                  <td style={{ whiteSpace: 'nowrap' }}>{formatDateTime(e.created_at)}</td>
                   <td>{e.username ?? '—'}</td>
                   <td className="mono" style={{ fontSize: 12 }}>{e.event_type}</td>
                   <td>{e.department_name ?? '—'}</td>

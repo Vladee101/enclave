@@ -1,5 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
+import { useI18n } from '../i18n';
 import { useLlmStream, type ChosenPlan, type Clarification } from '../hooks/useLlmStream';
 import { Spinner } from '../components/Spinner';
 import { DocumentsPanel, type DocInfo } from '../components/DocumentsPanel';
@@ -28,6 +29,7 @@ type ScopeDoc = Pick<DocInfo, 'id' | 'filename'>;
 
 export function ChatPage() {
   const { user } = useAuth();
+  const { t } = useI18n();
   const { partial, sources, calculation, clarification, streaming, ask } = useLlmStream();
   const [messages, setMessages]   = useState<Message[]>([]);
   const [input,    setInput]      = useState('');
@@ -105,13 +107,13 @@ export function ChatPage() {
       await ask(q, 5, plan, limitTo.map(d => d.id));
     } catch (e) {
       setMessages(prev => prev.map(m => (
-        m.id === botId ? { ...m, content: `⚠️ Error: ${String(e)}` } : m
+        m.id === botId ? { ...m, content: t('chat.error', { error: String(e) }) } : m
       )));
     } finally {
       streamingId.current = null;
       setTimeout(scrollBottom, 50);
     }
-  }, [streaming, user, ask]);
+  }, [streaming, user, ask, t]);
 
   const sendMessage = useCallback(() => {
     const q = input.trim();
@@ -141,8 +143,8 @@ export function ChatPage() {
       type="button"
       className="docs-panel-toggle"
       onClick={togglePanel}
-      title={panelOpen ? 'Hide documents' : 'Show documents'}
-      aria-label={panelOpen ? 'Hide documents' : 'Show documents'}
+      title={panelOpen ? t('chat.hideDocuments') : t('chat.showDocuments')}
+      aria-label={panelOpen ? t('chat.hideDocuments') : t('chat.showDocuments')}
     >
       {panelOpen ? '‹' : '›'}
     </button>
@@ -161,9 +163,9 @@ export function ChatPage() {
             paddingTop: 60,
           }}>
             <div style={{ fontSize: 48 }}>🔒</div>
-            <div style={{ fontSize: 18, fontWeight: 600 }}>Ask anything</div>
+            <div style={{ fontSize: 18, fontWeight: 600 }}>{t('chat.emptyTitle')}</div>
             <div style={{ fontSize: 14, color: 'var(--text-secondary)' }}>
-              Your queries and documents never leave this machine.
+              {t('chat.emptySubtitle')}
             </div>
           </div>
         )}
@@ -177,13 +179,13 @@ export function ChatPage() {
               {msg.role === 'bot' && msg.content === '' && streaming ? (
                 <div className="message-bubble" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                   <Spinner size={16} />
-                  <span style={{ color: 'var(--text-secondary)', fontSize: 13 }}>Thinking…</span>
+                  <span style={{ color: 'var(--text-secondary)', fontSize: 13 }}>{t('chat.thinking')}</span>
                 </div>
               ) : (
                 <div className="message-bubble">{msg.content}</div>
               )}
               {msg.role === 'user' && msg.scope && msg.scope.length > 0 && (
-                <div className="message-scope">in {msg.scope.map(d => d.filename).join(', ')}</div>
+                <div className="message-scope">{t('chat.inScope', { files: msg.scope.map(d => d.filename).join(', ') })}</div>
               )}
               {msg.clarification && msg.question && (
                 <div className="message-clarify">
@@ -202,7 +204,7 @@ export function ChatPage() {
               )}
               {msg.calculation && (
                 <details className="message-calculation">
-                  <summary>How this was calculated</summary>
+                  <summary>{t('chat.howCalculated')}</summary>
                   <pre>{msg.calculation}</pre>
                 </details>
               )}
@@ -225,14 +227,14 @@ export function ChatPage() {
       {/* ── Input bar ── */}
       {scope.length > 0 && (
         <div className="chat-scope">
-          <span className="chat-scope-label">Ask only in:</span>
+          <span className="chat-scope-label">{t('chat.askOnlyIn')}</span>
           {scope.map(d => (
             <span key={d.id} className="chat-scope-chip">
               {d.filename}
-              <button type="button" onClick={() => setScope(prev => prev.filter(s => s.id !== d.id))} aria-label={`Remove ${d.filename}`}>×</button>
+              <button type="button" onClick={() => setScope(prev => prev.filter(s => s.id !== d.id))} aria-label={t('chat.removeScope', { name: d.filename })}>×</button>
             </span>
           ))}
-          <button type="button" className="chat-scope-clear" onClick={() => setScope([])}>clear</button>
+          <button type="button" className="chat-scope-clear" onClick={() => setScope([])}>{t('chat.clear')}</button>
         </div>
       )}
       <div className="chat-input-bar">
@@ -240,7 +242,7 @@ export function ChatPage() {
           ref={inputRef}
           id="chat-input"
           className="chat-textarea"
-          placeholder="Ask a question about your documents… (Enter to send, Shift+Enter for newline)"
+          placeholder={t('chat.placeholder')}
           value={input}
           onChange={e => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
@@ -253,7 +255,7 @@ export function ChatPage() {
           className="chat-send-btn"
           onClick={sendMessage}
           disabled={streaming || !input.trim()}
-          aria-label="Send message"
+          aria-label={t('chat.send')}
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
             <line x1="22" y1="2" x2="11" y2="13" />

@@ -1,0 +1,192 @@
+/**
+ * English UI strings. The shape of this object is the contract: ru.ts is
+ * typed as `Dict`, so a key missing there — or an extra one — fails `tsc`.
+ * No `as const`: literals must widen to `string`/`string[]` so the Russian
+ * file can substitute free text.
+ *
+ * Plural entries are arrays of whole phrases containing `{count}`;
+ * `tPlural` picks the form with Intl.PluralRules (en: one/other,
+ * ru: one/few/many). Phrases that embed a counted noun take the already
+ * pluralized phrase as a `{var}` — word order differs between languages.
+ */
+export const en = {
+  common: {
+    add: '+ Add',
+    delete: 'Delete',
+    restartNow: 'Restart now',
+  },
+
+  nav: {
+    chat: 'Chat',
+    documents: 'Documents',
+    admin: 'Admin',
+    signOut: 'Sign out',
+  },
+
+  pages: {
+    chatTitle: 'Chat',
+    chatSubtitle: 'Query your knowledge base with privacy-first AI',
+    documentsTitle: 'Documents',
+    documentsSubtitle: 'Manage and ingest documents for RAG retrieval',
+    adminTitle: 'Admin',
+    adminSubtitle: 'Configure departments and LoRA adapters',
+  },
+
+  login: {
+    subtitle: 'On-premises knowledge, entirely yours',
+    selectProfile: 'Select profile',
+    noProfiles: 'No profiles yet. Create one below.',
+    pin: 'PIN',
+    enterPin: 'Enter your PIN',
+    signIn: 'Sign In',
+    createNewProfile: 'Create new profile',
+    username: 'Username',
+    usernameExample: 'e.g. alice',
+    choosePin: 'Choose a PIN',
+    createProfile: 'Create Profile',
+    back: 'Back',
+    selectProfileError: 'Select a profile.',
+    incorrectPin: 'Incorrect PIN.',
+  },
+
+  chat: {
+    hideDocuments: 'Hide documents',
+    showDocuments: 'Show documents',
+    emptyTitle: 'Ask anything',
+    emptySubtitle: 'Your queries and documents never leave this machine.',
+    thinking: 'Thinking…',
+    inScope: 'in {files}',
+    howCalculated: 'How this was calculated',
+    askOnlyIn: 'Ask only in:',
+    clear: 'clear',
+    placeholder: 'Ask a question about your documents… (Enter to send, Shift+Enter for newline)',
+    send: 'Send message',
+    removeScope: 'Remove {name}',
+    error: '⚠️ Error: {error}',
+  },
+
+  documents: {
+    statusPending: 'Pending',
+    statusReady: 'Ready',
+    statusFailed: 'Failed',
+    statusQueued: 'Queued',
+    statusIngesting: 'Ingesting…',
+    statusDone: 'Done',
+    unknownDept: 'Unknown dept',
+    sharedSuffix: ' (visible to everyone)',
+    uploadTo: 'Upload to:',
+    uploadToAria: 'Upload to department',
+    chooseDept: 'Choose a department…',
+    chooseDeptError: 'Choose the department to upload to first.',
+    uploadToNameAria: 'Upload documents to {name}',
+    chooseFirstAria: 'Choose a department first',
+    dropZoneIntro: 'Drop documents here to upload to',
+    chooseAbove: 'Choose a department above first',
+    dropZoneHint: 'PDF, DOCX, XLSX / XLS / ODS, TXT, MD — all stored locally',
+    chooseFilesAria: 'Choose files to upload',
+    noDocuments: 'No documents yet. Upload one above.',
+    deleteAria: 'Delete {name}',
+    uploadFailed: 'Upload of "{name}" failed: {error}',
+    deleteConfirmTitle: 'Delete "{name}"?',
+    deleteConfirmBody: 'Its text is removed from search immediately; this cannot be undone.',
+  },
+
+
+  admin: {
+    departments: 'Departments',
+    departmentsDesc: 'Each department can have its own documents and LoRA adapter. New profiles join only the default department; add them to others under Members.',
+    defaultBadge: 'default · everyone',
+    deleteDeptAria: 'Delete department {name}',
+    newDeptName: 'New department name…',
+    remove: 'Remove',
+    members: 'Members',
+    membersDesc: "Membership is what RLS checks on every query (ADR-0008): a change applies to the member's next request.",
+    user: 'User',
+    department: 'Department',
+    adapters: 'LoRA Adapters',
+    adaptersDescPre: 'Per-department adapters are hot-swapped per request (ADR-0003, 0004). Place',
+    adaptersDescMid: 'adapter files in',
+    adaptersDescPost: '.',
+    thName: 'Name',
+    thAdapterPath: 'Adapter path',
+    thScale: 'Scale',
+    thActive: 'Active',
+    thTime: 'Time',
+    thEvent: 'Event',
+    thDetails: 'Details',
+    active: 'Active',
+    off: 'Off',
+    auditLog: 'Audit log',
+    auditDesc: 'Last 100 events. Queries are logged by the documents and chunks they cited, not by their text.',
+    noEvents: 'No events yet.',
+    deleteDeptConfirmTitle: 'Delete department "{name}" together with its {docs} and {members}?',
+    deleteDeptConfirmBody: "The documents' text is removed from search immediately. Users stay, in their other departments. This cannot be undone.",
+    nDocuments: ['{count} document', '{count} documents'],
+    nMemberships: ['{count} membership', '{count} memberships'],
+  },
+
+    inScope: 'in {files}',
+    howCalculated: 'How this was calculated',
+
+  backup: {
+    title: 'Backup',
+    description: 'One file with the database and every document, of all departments. It is not encrypted: keep it as carefully as this computer. Models are not included — they download again.',
+    filterName: 'Enclave backup',
+    stageStart: 'Starting…',
+    stageDatabase: 'Database… a large one takes a few minutes',
+    stageFiles: 'Document files {done} / {total}…',
+    stageChecking: 'Checking the backup {done} / {total}…',
+    confirmReplace: 'Replace ALL data with the backup of {date}?',
+    confirmContents: 'It holds {documents}, {users}, {departments} ({size}).',
+    confirmWarning: 'Everything added since then is lost. Profiles and PINs become those of the backup — you will sign in with a profile from it. The backup is checked now; the data is replaced when Enclave restarts.',
+    stagedReady: 'Restore ready.',
+    stagedDesc: 'The backup of {date} ({documents}) was checked by {by}; it replaces the current data when Enclave restarts.',
+    keepCurrent: 'Keep the current data',
+    save: 'Save a backup…',
+    restore: 'Restore from a backup…',
+    savedSummary: 'Saved: {documents}, {files}, {size}.',
+    nDocuments: ['{count} document', '{count} documents'],
+    nFiles: ['{count} file', '{count} files'],
+    nProfiles: ['{count} profile', '{count} profiles'],
+    nDepartments: ['{count} department', '{count} departments'],
+    missingWarning: [
+      '{count} document file was missing or damaged on disk and is not in the backup.',
+      '{count} document files were missing or damaged on disk and are not in the backup.',
+    ],
+  },
+
+
+  modelSetup: {
+    modelsInstalled: 'Models installed',
+    modelsNeeded: 'AI models needed',
+    restartToLoad: 'Restart Enclave to load them.',
+    downloadDesc: "Answers and search run on two local models and the llama.cpp engine built for this machine's graphics. They are downloaded once ({size}) from their official repositories and checked; after that nothing leaves this machine.",
+    unverified: 'A file is there but was not installed by Enclave; it will be replaced.',
+    importPlaceholder: '…or path to a .gguf you already have',
+    use: 'Use',
+    downloading: 'Downloading…',
+    resume: 'Resume download',
+    download: 'Download',
+  },
+
+  docsPanel: {
+    title: 'Documents',
+    refresh: 'Refresh',
+    filterPlaceholder: 'Filter by name…',
+    noDocuments: 'No documents yet.',
+    nothingMatches: 'Nothing matches.',
+    hideColumns: 'Hide columns',
+    showColumns: 'Show columns',
+    stopLimiting: 'Stop limiting the question to {name}',
+    askOnlyIn: 'Ask only in {name}',
+    insertColumn: 'Insert «{name}» into the question',
+    typeNumber: 'number',
+    typeDate: 'date',
+    typeText: 'text',
+    statusPending: 'pending',
+    statusFailed: 'failed',
+    nRows: ['{count} row', '{count} rows'],
+  },
+};
+
+export type Dict = typeof en;

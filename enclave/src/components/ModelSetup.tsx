@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { useI18n, LangToggle } from '../i18n';
 
 interface ModelStatus {
   key:     string;
@@ -23,6 +24,7 @@ const gb = (bytes: number) => (bytes / 1e9).toFixed(2) + ' GB';
  * offline machine. The app restarts to load them.
  */
 export function ModelSetup() {
+  const { t } = useI18n();
   const [models,     setModels]     = useState<ModelStatus[] | null>(null);
   const [progress,   setProgress]   = useState<Record<string, number>>({});
   const [running,    setRunning]    = useState(false);
@@ -91,31 +93,32 @@ export function ModelSetup() {
   return (
     <div className={`model-setup${collapsed ? ' collapsed' : ''}`}>
       <div className="model-setup-header">
-        <span>{pending.length === 0 ? 'Models installed' : 'AI models needed'}</span>
-        <button type="button" className="model-setup-toggle" onClick={() => setCollapsed(c => !c)}>
-          {collapsed ? '▴' : '▾'}
-        </button>
+        <span>{pending.length === 0 ? t('modelSetup.modelsInstalled') : t('modelSetup.modelsNeeded')}</span>
+        {/* First-run overlay renders above the login card too — the language
+            switch must be reachable even before signing in. */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <LangToggle />
+          <button type="button" className="model-setup-toggle" onClick={() => setCollapsed(c => !c)}>
+            {collapsed ? '▴' : '▾'}
+          </button>
+        </div>
       </div>
       {!collapsed && (
         <div className="model-setup-body">
           {pending.length === 0 ? (
             <>
-              <p>Restart Enclave to load them.</p>
+              <p>{t('modelSetup.restartToLoad')}</p>
               <button
                 type="button"
                 className="btn btn-primary"
                 onClick={() => invoke('cmd_restart_app').catch(e => setError(String(e)))}
               >
-                Restart now
+                {t('common.restartNow')}
               </button>
             </>
           ) : (
             <>
-              <p>
-                Answers and search run on two local models and the llama.cpp engine built
-                for this machine&apos;s graphics. They are downloaded once ({gb(total)}) from
-                their official repositories and checked; after that nothing leaves this machine.
-              </p>
+              <p>{t('modelSetup.downloadDesc', { size: gb(total) })}</p>
               {pending.map(m => {
                 const done = progress[m.key] ?? m.partial;
                 const pct = Math.min(100, Math.round((done / m.size) * 100));
@@ -129,18 +132,18 @@ export function ModelSetup() {
                     </div>
                     <div className="model-setup-bar"><div style={{ width: `${pct}%` }} /></div>
                     {m.state === 'unverified' && (
-                      <div className="model-setup-note">A file is there but was not installed by Enclave; it will be replaced.</div>
+                      <div className="model-setup-note">{t('modelSetup.unverified')}</div>
                     )}
                     {!running && !m.key.startsWith('engine') && (
                       <div className="model-setup-import">
                         <input
                           className="input"
-                          placeholder="…or path to a .gguf you already have"
+                          placeholder={t('modelSetup.importPlaceholder')}
                           value={paths[m.key] ?? ''}
                           onChange={e => setPaths(prev => ({ ...prev, [m.key]: e.target.value }))}
                         />
                         <button type="button" className="btn btn-ghost" disabled={!paths[m.key]} onClick={() => importFile(m.key)}>
-                          Use
+                          {t('modelSetup.use')}
                         </button>
                       </div>
                     )}
@@ -148,7 +151,9 @@ export function ModelSetup() {
                 );
               })}
               <button type="button" className="btn btn-primary" onClick={download} disabled={running}>
-                {running ? 'Downloading…' : pending.some(m => m.partial > 0) ? 'Resume download' : 'Download'}
+                {running
+                  ? t('modelSetup.downloading')
+                  : pending.some(m => m.partial > 0) ? t('modelSetup.resume') : t('modelSetup.download')}
               </button>
             </>
           )}

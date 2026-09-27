@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useAuth } from '../contexts/AuthContext';
+import { useI18n, LangToggle } from '../i18n';
 import { Button } from '../components/Button';
 import { FormField } from '../components/FormField';
 import { ErrorText } from '../components/ErrorText';
@@ -12,6 +13,7 @@ interface UserInfo {
 
 export function LoginPage() {
   const { login } = useAuth();
+  const { t } = useI18n();
   const [users,       setUsers]       = useState<UserInfo[]>([]);
   const [selectedId,  setSelectedId]  = useState<string>('');
   const [pin,         setPin]         = useState('');
@@ -27,10 +29,10 @@ export function LoginPage() {
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
-    if (!selectedId) { setError('Select a profile.'); return; }
+    if (!selectedId) { setError(t('login.selectProfileError')); return; }
     setLoading(true); setError('');
     const ok = await login(selectedId, pin);
-    if (!ok) { setError('Incorrect PIN.'); setLoading(false); }
+    if (!ok) { setError(t('login.incorrectPin')); setLoading(false); }
   }
 
   async function handleCreate(e: React.FormEvent) {
@@ -49,21 +51,22 @@ export function LoginPage() {
 
   return (
     <div className="login-page">
-      <div className="login-card">
+      <div className="login-card" style={{ position: 'relative' }}>
+        <LangToggle className="lang-toggle-floating" />
         <div className="login-logo">
           <div className="login-logo-icon">🔒</div>
           <div className="login-title">Enclave</div>
-          <div className="login-subtitle">On-premises knowledge, entirely yours</div>
+          <div className="login-subtitle">{t('login.subtitle')}</div>
         </div>
 
         {!showCreate ? (
           <form onSubmit={handleLogin}>
             <div style={{ marginBottom: 14 }}>
-              <div className="form-label" style={{ marginBottom: 8 }}>Select profile</div>
+              <div className="form-label" style={{ marginBottom: 8 }}>{t('login.selectProfile')}</div>
               <div className="user-list">
                 {users.length === 0 && (
                   <div className="text-sm text-muted" style={{ padding: '8px 0' }}>
-                    No profiles yet. Create one below.
+                    {t('login.noProfiles')}
                   </div>
                 )}
                 {users.map(u => (
@@ -82,12 +85,12 @@ export function LoginPage() {
               </div>
             </div>
 
-            <FormField label="PIN" htmlFor="pin-input">
+            <FormField label={t('login.pin')} htmlFor="pin-input">
               <input
                 id="pin-input"
                 type="password"
                 className="input"
-                placeholder="Enter your PIN"
+                placeholder={t('login.enterPin')}
                 value={pin}
                 onChange={e => setPin(e.target.value)}
                 autoComplete="current-password"
@@ -103,7 +106,7 @@ export function LoginPage() {
               loading={loading}
               style={{ justifyContent: 'center', padding: '11px', marginTop: 4 }}
             >
-              Sign In
+              {t('login.signIn')}
             </Button>
 
             <Button
@@ -113,28 +116,28 @@ export function LoginPage() {
               style={{ justifyContent: 'center', marginTop: 8 }}
               onClick={() => setShowCreate(true)}
             >
-              Create new profile
+              {t('login.createNewProfile')}
             </Button>
           </form>
         ) : (
           <form onSubmit={handleCreate}>
-            <FormField label="Username" htmlFor="new-username">
+            <FormField label={t('login.username')} htmlFor="new-username">
               <input
                 id="new-username"
                 type="text"
                 className="input"
-                placeholder="e.g. alice"
+                placeholder={t('login.usernameExample')}
                 value={newUsername}
                 onChange={e => setNewUsername(e.target.value)}
                 required
               />
             </FormField>
-            <FormField label="PIN" htmlFor="new-pin">
+            <FormField label={t('login.pin')} htmlFor="new-pin">
               <input
                 id="new-pin"
                 type="password"
                 className="input"
-                placeholder="Choose a PIN"
+                placeholder={t('login.choosePin')}
                 value={newPin}
                 onChange={e => setNewPin(e.target.value)}
                 required
@@ -150,7 +153,7 @@ export function LoginPage() {
               loading={loading}
               style={{ justifyContent: 'center', padding: 11 }}
             >
-              Create Profile
+              {t('login.createProfile')}
             </Button>
             <Button
               type="button"
@@ -159,7 +162,7 @@ export function LoginPage() {
               style={{ justifyContent: 'center', marginTop: 8 }}
               onClick={() => setShowCreate(false)}
             >
-              Back
+              {t('login.back')}
             </Button>
           </form>
         )}

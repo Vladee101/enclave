@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open, save } from '@tauri-apps/plugin-dialog';
+import { useI18n, type TFunc } from '../i18n';
 import { Button } from './Button';
 import { ErrorText } from './ErrorText';
 
@@ -20,14 +21,13 @@ interface Progress { stage: 'database' | 'files' | 'checking'; done: number; tot
 
 const EXTENSION = 'enclave-backup';
 const mb = (bytes: number) => (bytes / 1e6).toFixed(1) + ' MB';
-const when = (iso: string) => new Date(iso).toLocaleString();
 
-function stageText(p: Progress | null): string {
-  if (!p) return 'Starting…';
+function stageText(t: TFunc, p: Progress | null): string {
+  if (!p) return t('backup.stageStart');
   switch (p.stage) {
-    case 'database': return 'Database… a large one takes a few minutes';
-    case 'files':    return `Document files ${p.done} / ${p.total}…`;
-    case 'checking': return `Checking the backup ${p.done} / ${p.total}…`;
+    case 'database': return t('backup.stageDatabase');
+    case 'files':    return t('backup.stageFiles',    { done: p.done, total: p.total });
+    case 'checking': return t('backup.stageChecking', { done: p.done, total: p.total });
   }
 }
 
@@ -37,6 +37,7 @@ function stageText(p: Progress | null): string {
  * replaces the data on the next start.
  */
 export function BackupCard() {
+  const { t, tPlural, formatDateTime } = useI18n();
   const [busy,     setBusy]     = useState<'backup' | 'restore' | null>(null);
   const [progress, setProgress] = useState<Progress | null>(null);
   const [made,     setMade]     = useState<BackupSummary | null>(null);
@@ -53,7 +54,7 @@ export function BackupCard() {
     const date = new Date().toISOString().slice(0, 10);
     const path = await save({
       defaultPath: `enclave-${date}.${EXTENSION}`,
-      filters: [{ name: 'Enclave backup', extensions: [EXTENSION] }],
+      filters: [{ name: t('backup.filterName'), extensions: [EXTENSION] }],
     });
     if (!path) return;
     setError(null); setMade(null); setProgress(null); setBusy('backup');
@@ -70,7 +71,7 @@ export function BackupCard() {
     const path = await open({
       multiple: false,
       directory: false,
-      filters: [{ name: 'Enclave backup', extensions: [EXTENSION] }],
+      filters: [{ name: t('backup.filterName'), extensions: [EXTENSION] }],
     });
     if (!path) return;
     setError(null); setMade(null);
@@ -82,10 +83,14 @@ export function BackupCard() {
       return;
     }
     if (!window.confirm(
-      `Replace ALL data with the backup of ${when(b.created_at)}?\n\n` +
-      `It holds ${b.documents} documents, ${b.users} profiles, ${b.departments} departments (${mb(b.bytes)}).\n\n` +
-      'Everything added since then is lost. Profiles and PINs become those of the backup — ' +
-      'you will sign in with a profile from it. The backup is checked now; the data is replaced when Enclave restarts.',
+      t('backup.confirmReplace', { date: formatDateTime(b.created_at) }) + '\n\n' +
+      t('backup.confirmContents', {
+        documents:   tPlural('backup.nDocuments', b.documents),
+        users:       tPlural('backup.nProfiles', b.users),
+        departments: tPlural('backup.nDepartments', b.departments),
+        size:        mb(b.bytes),
+      }) + '\n\n' +
+      t('backup.confirmWarning'),
     )) return;
     setProgress(null); setBusy('restore');
     try {
@@ -110,10 +115,9 @@ export function BackupCard() {
   return (
     <div className="card">
       <div style={{ marginBottom: 16 }}>
-        <div style={{ fontWeight: 600, fontSize: 15 }}>Backup</div>
+        <div style={{ fontWeight: 600, fontSize: 15 }}>{t('backup.title')}</div>
         <div className="text-sm text-muted" style={{ marginTop: 2 }}>
-          One file with the database and every document, of all departments. It is not encrypted:
-          keep it as carefully as this computer. Models are not included — they download again.
+          {t('backup.description')}
         </div>
       </div>
 
@@ -122,32 +126,40 @@ export function BackupCard() {
       {staged ? (
         <div className="backup-staged">
           <div>
-            <b>Restore ready.</b> The backup of {when(staged.backup.created_at)} ({staged.backup.documents} documents)
-            was checked by {staged.staged_by}; it replaces the current data when Enclave restarts.
+            <b>{t('backup.stagedReady')}</b>{' '}
+            {t('backup.stagedDesc', {
+              date:       formatDateTime(staged.backup.created_at),
+              documents:  tPlural('backup.nDocuments', staged.backup.documents),
+              by:         staged.staged_by,
+            })}
           </div>
           <div className="flex gap-3" style={{ marginTop: 10 }}>
-            <Button onClick={() => invoke('cmd_restart_app').catch(e => setError(String(e)))}>Restart now</Button>
-            <Button variant="ghost" onClick={cancelRestore}>Keep the current data</Button>
+            <Button onClick={() => invoke('cmd_restart_app').catch(e => setError(String(e)))}>{t('common.restartNow')}</Button>
+            <Button variant="ghost" onClick={cancelRestore}>{t('backup.keepCurrent')}</Button>
           </div>
         </div>
       ) : (
         <div className="flex gap-3 items-center">
           <Button onClick={makeBackup} loading={busy === 'backup'} disabled={busy !== null} spinnerSize={14}>
-            Save a backup…
+            {t('backup.save')}
           </Button>
           <Button variant="ghost" onClick={restore} loading={busy === 'restore'} disabled={busy !== null} spinnerSize={14}>
-            Restore from a backup…
+            {t('backup.restore')}
           </Button>
-          {busy && <span className="text-sm text-muted">{stageText(progress)}</span>}
+          {busy && <span className="text-sm text-muted">{stageText(t, progress)}</span>}
         </div>
       )}
 
       {made && (
         <div className="text-sm" style={{ marginTop: 12 }}>
-          Saved: {made.documents} documents, {made.files} files, {mb(made.bytes)}.
+          {t('backup.savedSummary', {
+            documents: tPlural('backup.nDocuments', made.documents),
+            files:     tPlural('backup.nFiles', made.files),
+            size:      mb(made.bytes),
+          })}
           {made.missing > 0 && (
             <span className="backup-warning">
-              {' '}{made.missing} document file(s) were missing or damaged on disk and are not in the backup.
+              {' '}{tPlural('backup.missingWarning', made.missing)}
             </span>
           )}
         </div>

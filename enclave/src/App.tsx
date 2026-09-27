@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
+import { I18nProvider, LangToggle, useI18n } from './i18n';
 import { LoginPage }     from './pages/Login';
 import { ChatPage }      from './pages/Chat';
 import { DocumentsPage } from './pages/Documents';
@@ -20,18 +21,19 @@ function IconLogout(){ return <svg width="14" height="14" viewBox="0 0 24 24" fi
 
 function AppShell() {
   const { user, logout } = useAuth();
+  const { t } = useI18n();
   const [page, setPage]  = useState<Page>('chat');
 
   const navItems: { id: Page; label: string; icon: React.ReactNode }[] = [
-    { id: 'chat',      label: 'Chat',      icon: <IconChat /> },
-    { id: 'documents', label: 'Documents', icon: <IconDocs /> },
-    ...(user?.is_admin ? [{ id: 'admin' as Page, label: 'Admin', icon: <IconAdmin /> }] : []),
+    { id: 'chat',      label: t('nav.chat'),      icon: <IconChat /> },
+    { id: 'documents', label: t('nav.documents'), icon: <IconDocs /> },
+    ...(user?.is_admin ? [{ id: 'admin' as Page, label: t('nav.admin'), icon: <IconAdmin /> }] : []),
   ];
 
   const pageTitles: Record<Page, { title: string; subtitle: string }> = {
-    chat:      { title: 'Chat',      subtitle: 'Query your knowledge base with privacy-first AI' },
-    documents: { title: 'Documents', subtitle: 'Manage and ingest documents for RAG retrieval' },
-    admin:     { title: 'Admin',     subtitle: 'Configure departments and LoRA adapters' },
+    chat:      { title: t('pages.chatTitle'),      subtitle: t('pages.chatSubtitle') },
+    documents: { title: t('pages.documentsTitle'), subtitle: t('pages.documentsSubtitle') },
+    admin:     { title: t('pages.adminTitle'),     subtitle: t('pages.adminSubtitle') },
   };
 
   return (
@@ -64,10 +66,14 @@ function AppShell() {
             id="logout-btn"
             className="sidebar-logout"
             onClick={logout}
-            title="Sign out"
+            title={t('nav.signOut')}
           >
             <IconLogout />
           </button>
+        </div>
+
+        <div className="sidebar-lang">
+          <LangToggle />
         </div>
       </aside>
 
@@ -109,8 +115,10 @@ export default function App() {
 
 export function AppWithProviders() {
   return (
-    <AuthProvider>
-      <App />
-    </AuthProvider>
+    <I18nProvider>
+      <AuthProvider>
+        <App />
+      </AuthProvider>
+    </I18nProvider>
   );
 }

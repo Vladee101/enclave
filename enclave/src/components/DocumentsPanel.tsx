@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { useI18n, type TStringKey } from '../i18n';
 
 export interface DocInfo {
   id:       string;
@@ -19,10 +20,16 @@ interface TableOutline {
   columns:     ColumnOutline[];
 }
 
-const TYPE_MARK: Record<ColumnOutline['type'], { mark: string; title: string }> = {
-  number: { mark: '#',  title: 'number' },
-  date:   { mark: '◷',  title: 'date' },
-  text:   { mark: 'Aa', title: 'text' },
+const TYPE_MARK: Record<ColumnOutline['type'], string> = {
+  number: '#',
+  date:   '◷',
+  text:   'Aa',
+};
+
+const TYPE_TITLE: Record<ColumnOutline['type'], TStringKey> = {
+  number: 'docsPanel.typeNumber',
+  date:   'docsPanel.typeDate',
+  text:   'docsPanel.typeText',
 };
 
 function fileIcon(name: string): string {
@@ -51,6 +58,7 @@ interface Props {
  * needs no clarification (ADR-0023). Names and types only — no cell values.
  */
 export function DocumentsPanel({ onInsert, selected, onToggleSelect, onLoaded }: Props) {
+  const { t, tPlural, formatNumber } = useI18n();
   const [docs,     setDocs]     = useState<DocInfo[]>([]);
   const [tables,   setTables]   = useState<TableOutline[]>([]);
   const [filter,   setFilter]   = useState('');
@@ -94,20 +102,20 @@ export function DocumentsPanel({ onInsert, selected, onToggleSelect, onLoaded }:
   return (
     <aside className="docs-panel">
       <div className="docs-panel-header">
-        <span>Documents</span>
-        <button type="button" className="docs-panel-refresh" onClick={load} disabled={loading} title="Refresh">
+        <span>{t('docsPanel.title')}</span>
+        <button type="button" className="docs-panel-refresh" onClick={load} disabled={loading} title={t('docsPanel.refresh')}>
           ↻
         </button>
       </div>
       <input
         className="input docs-panel-filter"
-        placeholder="Filter by name…"
+        placeholder={t('docsPanel.filterPlaceholder')}
         value={filter}
         onChange={e => setFilter(e.target.value)}
       />
       {error && <div className="docs-panel-empty">{error}</div>}
       {!error && shown.length === 0 && (
-        <div className="docs-panel-empty">{docs.length === 0 ? 'No documents yet.' : 'Nothing matches.'}</div>
+        <div className="docs-panel-empty">{docs.length === 0 ? t('docsPanel.noDocuments') : t('docsPanel.nothingMatches')}</div>
       )}
       <ul className="docs-panel-list">
         {shown.map(d => {
@@ -124,8 +132,8 @@ export function DocumentsPanel({ onInsert, selected, onToggleSelect, onLoaded }:
                   className="docs-panel-chevron"
                   onClick={() => expandable && toggle(d.id)}
                   disabled={!expandable}
-                  aria-label={isOpen ? 'Hide columns' : 'Show columns'}
-                  title={expandable ? (isOpen ? 'Hide columns' : 'Show columns') : undefined}
+                  aria-label={isOpen ? t('docsPanel.hideColumns') : t('docsPanel.showColumns')}
+                  title={expandable ? (isOpen ? t('docsPanel.hideColumns') : t('docsPanel.showColumns')) : undefined}
                 >
                   {expandable ? (isOpen ? '▾' : '▸') : ''}
                 </button>
@@ -135,13 +143,19 @@ export function DocumentsPanel({ onInsert, selected, onToggleSelect, onLoaded }:
                   onClick={() => selectable && onToggleSelect(d)}
                   disabled={!selectable}
                   title={selectable
-                    ? (isSelected ? `Stop limiting the question to ${d.filename}` : `Ask only in ${d.filename}`)
+                    ? (isSelected
+                        ? t('docsPanel.stopLimiting', { name: d.filename })
+                        : t('docsPanel.askOnlyIn', { name: d.filename }))
                     : d.filename}
                 >
                   <span>{fileIcon(d.filename)}</span>
                   <span className="docs-panel-name">{d.filename}</span>
                   {isSelected && <span className="docs-panel-check">✓</span>}
-                  {d.status !== 'ready' && <span className={`docs-panel-status ${d.status}`}>{d.status}</span>}
+                  {d.status !== 'ready' && (
+                    <span className={`docs-panel-status ${d.status}`}>
+                      {t(d.status === 'failed' ? 'docsPanel.statusFailed' : 'docsPanel.statusPending')}
+                    </span>
+                  )}
                 </button>
               </div>
               {expandable && isOpen && (
@@ -149,16 +163,18 @@ export function DocumentsPanel({ onInsert, selected, onToggleSelect, onLoaded }:
                   {sheets.map(s => (
                     <div key={s.sheet}>
                       {sheets.length > 1 && <div className="docs-panel-sheet">{s.sheet}</div>}
-                      <div className="docs-panel-rows">{s.row_count.toLocaleString('ru-RU')} rows</div>
+                      <div className="docs-panel-rows">
+                        {tPlural('docsPanel.nRows', s.row_count, { count: formatNumber(s.row_count) })}
+                      </div>
                       {s.columns.map(c => (
                         <button
                           key={c.name}
                           type="button"
                           className="docs-panel-column"
                           onClick={() => onInsert(`«${c.name}»`)}
-                          title={`Insert «${c.name}» into the question`}
+                          title={t('docsPanel.insertColumn', { name: c.name })}
                         >
-                          <span className="docs-panel-type" title={TYPE_MARK[c.type].title}>{TYPE_MARK[c.type].mark}</span>
+                          <span className="docs-panel-type" title={t(TYPE_TITLE[c.type])}>{TYPE_MARK[c.type]}</span>
                           <span className="docs-panel-name">{c.name}</span>
                         </button>
                       ))}

@@ -956,3 +956,48 @@ code, .mono {
   font-size: 13px;
 }
 .backup-warning { color: var(--warning); }
+
+/* ── Language toggle (RU | EN) ─────────────────────────── */
+.lang-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.lang-toggle button {
+  background: transparent;
+  border: none;
+  padding: 3px 9px;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: var(--transition);
+}
+.lang-toggle button:hover { color: var(--text-primary); }
+.lang-toggle button.on {
+  background: var(--accent-subtle);
+  color: var(--text-accent);
+}
+
+/* Floating variant — top-right of the login card. */
+.lang-toggle-floating {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  opacity: 0.7;
+  transition: var(--transition);
+}
+.lang-toggle-floating:hover { opacity: 1; }
+
+/* Sidebar placement — centered under the user block. */
+.sidebar-lang {
+  display: flex;
+  justify-content: center;
+  padding-top: 10px;
+  opacity: 0.7;
+  transition: var(--transition);
+}
+.sidebar-lang:hover { opacity: 1; }
