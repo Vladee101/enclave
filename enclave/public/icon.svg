@@ -1,0 +1,37 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <!--
+    Enclave app icon — source of truth for all generated platform icons.
+    Regenerate with:  pnpm tauri icon src-tauri/app-icon.svg
+    Palette matches the design system (src/styles/index.css):
+    dark navy base #0b0d14–#1e2338, indigo accent #6366f1–#818cf8.
+    Motif: a shielded keyhole — a fortified, self-contained space.
+  -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1e2338"/>
+      <stop offset="1" stop-color="#0b0d14"/>
+    </linearGradient>
+    <linearGradient id="shield" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#818cf8"/>
+      <stop offset="1" stop-color="#6366f1"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.42" r="0.6">
+      <stop offset="0" stop-color="#6366f1" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#6366f1" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="118" fill="url(#bg)"/>
+  <rect width="512" height="512" rx="118" fill="url(#glow)"/>
+
+  <!-- Shield -->
+  <path d="M256 78 L376 122 V216 C376 318 326 388 256 436 C186 388 136 318 136 216 V122 Z"
+        fill="url(#shield)"/>
+  <!-- Inner edge light -->
+  <path d="M256 78 L376 122 V216 C376 318 326 388 256 436 C186 388 136 318 136 216 V122 Z"
+        fill="none" stroke="#c7d2fe" stroke-opacity="0.35" stroke-width="10"/>
+
+  <!-- Keyhole -->
+  <circle cx="256" cy="226" r="40" fill="#0b0d14"/>
+  <path d="M242 250 H270 L288 348 H224 Z" fill="#0b0d14"/>
+</svg>
