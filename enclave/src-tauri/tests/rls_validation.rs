@@ -285,6 +285,47 @@ async fn test_rls_policies() -> Result<(), Box<dyn std::error::Error>> {
         tx.rollback().await?;
     }
 
+    // 3b. The copied department_id must be the parent's (ADR-0012,
+    // migration 017): refused by the database for any role — here the
+    // superuser, which bypasses RLS like ingest_worker does.
+    {
+        let wrong_chunk = sqlx::query(
+            "INSERT INTO chunks (document_id, department_id, chunk_index, content, token_count)              VALUES ($1, $2, 1, 'hr text stamped as engineering', 5)",
+        )
+        .bind(hr_doc_id)
+        .bind(eng_id)
+        .execute(&admin_pool)
+        .await
+        .expect_err("a chunk in another department than its document");
+        assert_eq!(sqlstate(&wrong_chunk).as_deref(), Some("23503"), "{wrong_chunk}");
+
+        // A second model: the chunk already has its one vector for the first.
+        let other_model: Uuid = sqlx::query_scalar(
+            "INSERT INTO embedding_models (name, dimension) VALUES ('test-model-2', 768) RETURNING id",
+        )
+        .fetch_one(&admin_pool)
+        .await?;
+        let wrong_vector = sqlx::query(
+            "INSERT INTO chunk_embeddings (chunk_id, embedding_model_id, department_id, embedding) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(hr_chunk_id)
+        .bind(other_model)
+        .bind(eng_id)
+        .bind(&vec![0.2f32; 768])
+        .execute(&admin_pool)
+        .await
+        .expect_err("an embedding in another department than its chunk");
+        assert_eq!(sqlstate(&wrong_vector).as_deref(), Some("23503"), "{wrong_vector}");
+
+        let moved = sqlx::query("UPDATE documents SET department_id = $2 WHERE id = $1")
+            .bind(hr_doc_id)
+            .bind(eng_id)
+            .execute(&admin_pool)
+            .await
+            .expect_err("a document with content moved to another department");
+        assert_eq!(sqlstate(&moved).as_deref(), Some("23503"), "{moved}");
+    }
+
     // 4. department_adapters is scoped the same way.
     {
         let mut tx = app_pool.begin().await?;

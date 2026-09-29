@@ -326,7 +326,8 @@ pub async fn cmd_delete_document(
 /// Remove `{app_data}/blobs/{file_hash}` after a deletion has committed,
 /// once the database has said no live document uses those bytes any more.
 /// Best effort: the deletion already happened, and a leftover file is an
-/// orphan for ADR-0013's GC, not a reason to report the deletion as failed.
+/// orphan nothing reads (ADR-0013 — orphans are not collected), not a
+/// reason to report the deletion as failed.
 pub(crate) async fn remove_blob(app: &AppHandle, file_hash: &str) {
     let blob = match app.path().app_data_dir() {
         Ok(dir) => dir.join("blobs").join(file_hash),

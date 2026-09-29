@@ -1,227 +1,122 @@
 # Enclave — Session Handoff
 
-On-premises RAG + LoRA desktop app (portfolio piece). This file captures the
-current state so a new chat can continue without re-deriving anything.
+On-premises RAG + LoRA desktop app (portfolio piece). This file is the
+current state for a new session: what works, how to run it, what bites,
+what is open. The *why* is in `docs/adr/`; the rules are in `CLAUDE.md`.
+Verify anything here against the code before relying on it.
 
 ## TL;DR
 
-The app **builds and runs**. The full shell works: create profile, login/logout,
-document upload (with sha-256 dedup), and the async ingestion pipeline running
-end to end. Inference is **not** running yet — `src-tauri/binaries/llama-server…exe`
-is still a 27-byte placeholder, so ingestion jobs fail gracefully with "sidecar
-unavailable." The *wiring* is done, including the second, separate embedding
-sidecar on port 8081 (commit b6960f6), so the remaining work is Plan A: put the
-real binary and the two GGUF models in place and confirm they run.
+Feature-complete for a single machine and shipped as a Windows installer.
 
-## Stack & layout
+- **Runs end to end on a live model.** Upload (PDF / DOCX / XLSX / XLS / ODS
+  / TXT / MD) → ingestion → hybrid search with citations → streamed answers
+  from Qwen3-4B; table questions compute exact numbers from a validated plan
+  (ADR-0022, 0023).
+- **Department isolation is the database's job** (RLS, ADR-0008/0021), and
+  since migration 017 the department copied onto chunks and table rows must
+  match the parent's (ADR-0012).
+- **Self-contained:** the app runs its own PostgreSQL 18 + pgvector
+  (ADR-0014); the llama.cpp engine and both models download on first run for
+  the machine's GPU (ADR-0024, 0025). NSIS installer, per user, ~22 MB.
+- **Backups:** one archive with the database and files; a restore is checked,
+  staged, and swapped in at the next start (ADR-0026).
+- **UI in Russian and English**; errors from the core carry codes the UI
+  words (`src-tauri/src/error.rs`, `src/i18n/`).
 
-- Tauri 2 + React + Vite + TypeScript, Rust core, PostgreSQL 16 + pgvector,
-  bundled llama-server sidecar (currently a stub).
-- **Real project directory: `C:\Users\vlade\Desktop\enclave-anti\enclave`**
-  (the NESTED one). Run all commands from there.
-- ⚠️ The project used to live under `~/OneDrive/Desktop/…`; a stale copy may
-  still be there, and so is the parent `enclave-anti/` — neither is the
-  project. Always confirm with `pwd`; you want it to end in
-  `enclave-anti/enclave`.
-- ⚠️ Stale `target/` artifacts can still carry the old OneDrive path baked in
-  and break the build with `failed to read plugin permissions: … \OneDrive\ …
-  (os error 3)`. Fix: `cargo clean -p tauri` (≈195 MB, rebuilds that crate),
-  not a full `cargo clean`.
+## Layout
 
-## Infrastructure / how to run
+- Project: `C:\Users\vlade\Desktop\enclave-anti\enclave` (the nested one).
+  The parent `enclave-anti/` holds docs, CLAUDE.md and the git root.
+- Core: `src-tauri/src/` — `commands/` (thin Tauri wrappers), `retrieval/`,
+  `ingest/`, `tables/` (plans + aggregates), `llm/` (sidecars, model and
+  engine downloads), `db/` (pools, RLS helper, embedded PostgreSQL),
+  `backup.rs`, `error.rs`.
+- Schema: `migrations/001-017`, applied at every start. `db/schema.sql` is
+  historical reference only — **the schema is what the migrations build.**
+- Frontend: `src/` — pages, `components/`, `i18n/{en,ru}.ts` (typed: a key
+  missing in one fails `tsc`).
 
-**Database (Docker):**
-- Container `enclave-db`, image `pgvector/pgvector:pg16`, port mapped **5433:5432**
-  (5433 on host, deliberately not 5432 to avoid clashing with the `geolock-pg`
-  PostGIS container).
-- Database `enclave`. Schema is applied by `sqlx::migrate!("../migrations")`
-  against `ADMIN_DATABASE_URL` on every app startup (`db/mod.rs`), i.e. from
-  `enclave/migrations/*.sql`, currently 001-007. **`db/schema.sql` (and its
-  copy at `enclave/db/schema.sql`) is NOT applied anywhere and is not the
-  live schema** — it was the originally-provided reference design (different
-  table/column names throughout: `memberships`+`roles`, `password_hash`,
-  `title`, `file_hash`, etc.) and diverged from what actually got built.
-  Treat `enclave/migrations/*.sql` as the only source of truth for the DB
-  schema; `db/schema.sql` is historical reference material only.
-- Roles: `app_user`/`enclave_app` (RLS-enforced query path, non-superuser),
-  `ingest_worker` (BYPASSRLS, non-superuser — the *only* role the ingestion
-  worker connects as, since migrations/005), and the `postgres` superuser
-  (used as the admin/provisioning role and to run migrations).
+## Running
 
-**Env vars — must be set in the same terminal that runs the app, every session:**
+**Default (what users get):** no env vars → embedded PostgreSQL in
+`%APPDATA%\com.softwarean.enclave\pgdata`, passwords sealed with DPAPI in
+`db-secrets.bin`. Needs `src-tauri/binaries/pg` (`scripts/fetch-postgres.ps1`,
+reads a local PostgreSQL 18 install, builds pgvector with MSVC).
+
 ```bash
-export ADMIN_DATABASE_URL="postgres://postgres:<superuser-pass>@localhost:5433/enclave"
-export APP_DATABASE_URL="postgres://app_user:change-me@localhost:5433/enclave"
-export INGEST_DATABASE_URL="postgres://ingest_worker:change_me_in_production@localhost:5433/enclave"
-npm run tauri dev
+cd enclave && pnpm tauri dev
 ```
-`INGEST_DATABASE_URL` is new (migrations/005_role_alignment_and_columns.sql):
-the ingestion worker no longer reuses `admin_pool` (which connects as the
-`postgres` superuser) — it now connects as its own `ingest_worker` role
-(BYPASSRLS, non-superuser, no DDL rights), per CLAUDE.md invariant #3. Run
-migrations at least once with `ADMIN_DATABASE_URL` set before starting the
-app so the `ingest_worker` role exists.
-⚠️ These vanish when the terminal closes (set with `export`, session-scoped).
-This has bitten us 3×. **Pending quality-of-life fix:** add `dotenvy` + a
-`.env` in `src-tauri/` so they persist (not yet done).
 
-**Toolchain:** rustc **1.96.0** (stable; an earlier version of this file said
-1.91.1 — it was stale). CI pins the same version in `.github/workflows/ci.yml`;
-there is deliberately no `rust-toolchain.toml`, because it would make every
-local build download that exact toolchain. sqlx stays on 0.8; bump it (and the
-CI pin) deliberately, with a full `cargo test` including `rls_validation`.
+**Server mode (development data in Docker):** container `enclave-db`
+(`pgvector/pgvector:pg16`, host port 5433). Set all three or none:
 
-## Fixes applied this session (so you know the code's current state)
+```bash
+ADMIN_DATABASE_URL=postgres://postgres:yourpass@localhost:5433/enclave
+APP_DATABASE_URL=postgres://enclave_app:change_me_in_production@localhost:5433/enclave
+INGEST_DATABASE_URL=postgres://ingest_worker:change_me_in_production@localhost:5433/enclave
+```
 
-Dependency pins (in `src-tauri/Cargo.toml` / lockfile) — **correcting stale
-notes that used to be here**: an earlier version of this file claimed a
-`pgvector` crate pin and `time = "=0.3.51"`. Neither is true of the current
-tree — verify against `Cargo.toml`/`Cargo.lock` directly rather than trusting
-this file's memory of past sessions:
-- There is **no `pgvector` crate dependency**. Embeddings are bound as plain
-  `Vec<f32>`/`&[f32]`; the `real[] -> vector` assignment cast pgvector
-  registers on the extension side handles the conversion at the SQL layer
-  (`retrieval/mod.rs`, `ingest/mod.rs`). If a `Vector` wrapper type is added
-  later, re-pin per the sqlx-compatibility note that used to be here.
-- `time` is currently pinned to **0.3.36** (`Cargo.toml`), not 0.3.51.
-- `argon2` (PIN hashing) and `sha2` (file hashing) are present.
+**Tests** (Docker up):
 
-State management (`src-tauri/src/lib.rs`):
-- Defined `AppState { app_pool, admin_pool }`, built in `.setup()` via
-  `tauri::async_runtime::block_on`, registered with `app.manage(...)`.
-- `LlmClient` is **optional**: `init` returns `Option<llm::LlmClient>` and it is
-  managed as `Option<LlmClient>`. This is the "Plan B" that lets the app boot
-  without a real sidecar.
+```bash
+TEST_ADMIN_URL=postgres://postgres:yourpass@localhost:5433/enclave \
+TEST_APP_URL=postgres://enclave_app:change_me_in_production@localhost:5433/enclave \
+ENCLAVE_REQUIRE_DB_TESTS=1 ENCLAVE_REQUIRE_BACKUP_TEST=1 cargo test --all-targets
+```
 
-Column-name mismatches: **this used to be a live bug** — the Rust code was
-patched (in an earlier session) against a hand-altered dev database to
-expect `email`/`password_hash`/`slug`/`title`/`file_hash`/`error`, but the
-checked-in `enclave/migrations/002_core_tables.sql` still defined
-`pin_hash`/no email/no slug/`filename`/no file_hash/`error_text`. That meant
-a *fresh* database (new machine, CI, anyone else cloning this) would fail
-immediately with "column does not exist" on login/upload/admin — none of it
-was actually reproducible. **This is now fixed properly**: rather than
-re-patching the code again, `enclave/migrations/005_role_alignment_and_columns.sql`
-renames/adds the columns so a fresh migrate produces exactly what the code
-queries:
-- `pin_hash` → `password_hash`; `email` added (backfilled `username@local`)
-- `users.is_admin` added (see "Admin authorization" below)
-- `departments.slug` added (backfilled from `name`)
-- `filename` → `title` on `documents`; `file_hash` added (unique per
-  department, backfilled with a synthetic placeholder for any pre-existing
-  rows — real uploads always compute a genuine sha-256)
-- `queued_at` → `created_at`, `error_text` → `error` on `ingestion_jobs`
+Without the env vars the DB tests skip silently; `ENCLAVE_REQUIRE_*` makes
+them fail instead. `backup_roundtrip` needs `binaries/pg` (skipped in CI).
+CI runs on PostgreSQL 16 and 18.
 
-Rust struct fields are still named `filename` in a couple of DTOs
-(`DocumentInfo`, `JobStatus`) — those alias in SQL (`title AS filename`),
-which is intentional and doesn't need to change.
+**Installer:** `powershell -File .\scripts\build-installer.ps1` →
+`target\release\bundle\nsis\Enclave_0.1.0_x64-setup.exe`. Bundle settings
+live in `src-tauri/tauri.bundle.json`, merged only by that script.
 
-Robustness:
-- `cmd_get_job_status`: `fetch_one` → `fetch_optional`, returns `Option<JobStatus>`.
-- Frontend null guards: `src/hooks/useJobPoller.ts` (`JobStatus | null` +
-  `if (!status) return`) and `src/pages/Documents.tsx` (`if (!job) return` in the
-  `forEach`). These fixed a black-screen crash after the Option change.
-- Ingestion worker (`ingest/jobs.rs`) fetches `Option<LlmClient>`; if `None`, it
-  marks the job `failed` with a clear message instead of panicking.
-- **Startup reaper** in `run_job_loop`: on boot, resets any `running` job back to
-  `queued` (orphans from a crashed previous run). Runs once before the loop.
+## Things that bite
 
-## Known-good verification
+- **Processes started from a Claude session run in its MSIX sandbox:**
+  their writes to AppData land in `Packages\Claude_…\LocalCache`, not the
+  real profile. Installing or testing the installed app must be done by the
+  user from Explorer.
+- **A running Enclave locks `target\debug\enclave.exe`**, so `cargo test`
+  fails to link; use a separate `CARGO_TARGET_DIR`.
+- **`sqlx::migrate!` embeds migrations at compile time**; `build.rs` reruns
+  on `../migrations`, so a new migration needs a rebuild, not just a restart.
+- **Restart is refused in dev builds** (a restarted process loses the Vite
+  server → white window). Close and `pnpm tauri dev` again.
+- **Tauri plugin versions:** the npm package and the crate must match
+  major.minor (`tauri-plugin-dialog` is pinned `~2.7` on both sides), and
+  CI installs with `--frozen-lockfile`.
+- **The trimmed PostgreSQL has no `psql`.** Use `docker exec enclave-db psql`
+  or a full local install for poking at databases.
+- **Docker DB drift:** it was once hand-built from `db/schema.sql`, so it has
+  extra columns and a duplicate HNSW index no migration creates. Code that
+  works only there is a bug; add startup statements to
+  `tests/schema_contract.rs`.
+- **git push over this network** fails intermittently with TLS handshake
+  errors; retry.
 
-`SELECT status, count(*) FROM ingestion_jobs GROUP BY status;` shows all jobs in
-`failed` (expected — no model yet), none stuck in `running`. Upload → hash →
-insert → enqueue → claim → graceful-fail works end to end.
+## Open
 
-## Open issues
+- **Clean-machine check of the installer** (no VC++ runtime, no NVIDIA —
+  Vulkan/CPU path). Needs a VM or a second PC; Windows 11 Home here has no
+  Hyper-V/Sandbox.
+- **Code signing** (SmartScreen warns about an unknown publisher).
+- **LoRA adapters:** wired end to end, never exercised with a real adapter.
+- **OCR:** scanned PDFs without a text layer are not read.
+- **Table-question eval script:** the 12 reference questions are checked by
+  hand only.
+- **Backups:** no encryption, no schedule (ADR-0026).
+- **Model download errors** arrive as events with English text; not coded.
 
-Resolved this session:
-1. ~~`Admin.tsx:32` console error — `file_path`/`adapter_path` mismatch~~ —
-   **fixed**: `department_adapters` always had the column named `adapter_path`;
-   `commands/admin.rs` was querying a nonexistent `file_path`. Both
-   `cmd_list_adapters` and `cmd_add_adapter` were broken by this (not just
-   listing, as previously noted here).
-2. **No RLS-scoped admin path** — `cmd_create_department`/`cmd_add_adapter`/
-   `cmd_create_user` had zero authorization checks (any session could call
-   them), and `cmd_list_departments` leaked every department in the org to
-   every user regardless of membership. **Fixed**: `users.is_admin` (first
-   user created becomes admin), `require_admin()` gates the two mutation
-   commands, and `cmd_list_my_departments` (RLS-scoped, migrations/005) is
-   what the Documents-page picker uses now instead of the admin-only listing.
-3. **Ingestion ran as the `postgres` superuser** (`ingest_pool` was a clone of
-   `admin_pool`) — violated CLAUDE.md invariant #3. **Fixed**: dedicated
-   `ingest_worker` role + `INGEST_DATABASE_URL` (see env vars above).
-4. **LoRA adapter ids were fabricated** via `ROW_NUMBER()` over
-   `department_adapters` rows instead of the sidecar's real loaded-adapter
-   index — would misassign adapters once real inference is wired up,
-   especially when one adapter file serves multiple departments. **Fixed**:
-   `LlmClient::refresh_adapter_index()` reads `GET /lora-adapters` from the
-   sidecar and resolves by path; `spawn()` now also loads active
-   `department_adapters.adapter_path` rows as `--lora` args at boot.
-5. **Blob store was never implemented** — uploaded bytes were hashed then
-   discarded; `ingest_document` used a hardcoded placeholder string.
-   **Fixed**: `cmd_upload_document` writes to `{app_data_dir}/blobs/{file_hash}`;
-   `ingest_document` reads it back. (Text extraction is no longer lossy
-   UTF-8: PDF / DOCX / TXT / MD since ADR-0019, `ingest/extract.rs`.)
+## Working style that works
 
-Still open (deferred, not blocking Plan A):
-6. **Stale status badge** — uploaded docs show `PENDING` in the UI even though the
-   DB has them as `failed`. The poller only tracks jobs from the current session;
-   docs present on reload aren't polled. Deferred: once the model works, docs get
-   re-uploaded and this becomes moot (badge will show real `ready`/`failed`).
-7. **Swallowed frontend errors** — upload failures go to the browser console, not
-   the UI. Cosmetic; worth surfacing later.
-8. **`.env` file** not set up (see env vars above — now three vars to remember).
-9. ~~**Not committed to git.**~~ — **fixed**: the tree is under git and pushed
-   to `Vladee101/enclave`. This was the root cause behind issues 1-5 above:
-   schema drift and stale doc claims went unnoticed because nothing was ever
-   diffed or reviewed.
-
-## NEXT: Plan A — install real llama-server
-
-Replaces the 27-byte placeholder at
-`src-tauri/binaries/llama-server-x86_64-pc-windows-msvc.exe`.
-
-**Hardware:** Acer Nitro V — i7-13620H, **RTX 4050 Laptop (6 GB VRAM)**, 16 GB RAM.
-→ CUDA build. 6 GB VRAM ceiling means a ~7B model at Q4 (~4.5 GB), mostly in VRAM
-with some layers spilling to RAM. Qwen 2.5 7B Q4 matches what the code assumes.
-
-**Downloads (from github.com/ggml-org/llama.cpp/releases, latest release):**
-- `llama-<build>-bin-win-cuda-x64.zip` (the server + tools)
-- `cudart-llama-bin-win-cuda-*-x64.zip` (CUDA DLLs — **required**; without them
-  llama-server.exe starts and silently does nothing). Extract into the SAME
-  folder as the exe.
-- A base model GGUF (~7B Q4, e.g. Qwen 2.5) placed where the code expects it:
-  `models/base.gguf`.
-
-**Sidecar spawn (current, in `src-tauri/src/llm/mod.rs`):**
-- Base URL `http://127.0.0.1:8080`, health-checked at `/health`.
-- Args: `--port 8080 --lora-init-without-apply --model models/base.gguf`, plus
-  one `--lora <adapter_path>` per row currently in `department_adapters`
-  where `is_active = true` (read from the DB at spawn time). After the
-  health check passes, `refresh_adapter_index()` calls `GET /lora-adapters`
-  on the sidecar and caches path→id so `llm/adapters.rs` can resolve the
-  *real* sidecar id per request instead of guessing one.
-
-**~~CRITICAL GAP for ingestion~~ — resolved (commit b6960f6):** the chat spawn
-still has no `--embedding` flag, deliberately. A *second* llama-server is
-spawned on port 8081 with `--embedding` and its own small model
-(`models/embed.gguf`), and it registers itself in `embedding_models` as the one
-active model. Two processes, not one, because `chunk_embeddings.embedding` is a
-fixed `vector(768)` (ADR-0007) and the chat model's hidden dimension is not 768.
-The embedding sidecar is best-effort: if it fails to start, chat still works and
-only ingestion fails, with a clear error. So Plan A now needs **two** GGUFs:
-`models/base.gguf` (chat, ~7B Q4) and `models/embed.gguf` (768-dim embeddings).
-
-**Recommended approach:** test `llama-server.exe` **standalone from the command
-line first** (with the model, by hand) before touching the Tauri wiring — so any
-failure is isolated to the binary/model, not the integration. Then wire, then
-solve embeddings.
-
-## Working style that's been effective
-
-- One step at a time; wait for output before the next step. No "if X then Y"
-  branching in instructions.
-- When a runtime error says "column X does not exist," the schema is right and the
-  code is wrong — rename in the code (SQL/`.get()`/`.bind()` only).
-- The DevTools console (F12 in the app window) is where frontend errors surface;
-  the terminal is where Rust/DB errors surface. Check both.
+- The user writes in Russian; docs (README, ADRs) are Russian, code and
+  CLAUDE.md English. Terminology, decided: the UI says «отдел», the Russian
+  docs and the schema «департамент» / `departments`.
+- Commit and push only on the user's explicit go-ahead; they review first.
+- Downloads (models, binaries, source archives) only after saying what,
+  from where and how big.
+- Numbers in docs come from measurements made in the session; a claim
+  about a test means the test was seen failing without the change.

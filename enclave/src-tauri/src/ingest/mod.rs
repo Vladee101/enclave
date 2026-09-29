@@ -93,8 +93,9 @@ fn check_dimension(embedding: &[f32], expected: i32) -> Result<()> {
 
 /// Ingest a single document: split → embed → insert chunks + embeddings.
 ///
-/// Called by the job runner.  `user_id` must be set on the connection
-/// before this is called so RLS permits the writes (ADR-0008).
+/// Called by the job runner on `ingest_pool` (ingest_worker, BYPASSRLS —
+/// ADR-0012): every row written gets the document's own department_id,
+/// and the composite foreign keys of migration 017 refuse any other.
 pub async fn ingest_document(
     pool: &PgPool,
     llm: &crate::llm::LlmClient,

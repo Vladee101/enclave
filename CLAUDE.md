@@ -6,7 +6,7 @@
 ## What this file is
 
 A build brief for the coding agent. **The source of truth for *why* is
-`docs/adr/`** — twenty-four accepted Architecture Decision Records (0001–0010, 0014–0026; 0011 superseded by 0021). This file says *what
+`docs/adr/`** — twenty-six accepted Architecture Decision Records (0001–0026; 0011 superseded by 0021). This file says *what
 to build, in what order, and which invariants must never be broken.* When a
 decision here seems arbitrary, the matching ADR explains it. Do not contradict
 an ADR; if reality forces a change, write a new ADR that supersedes the old one
@@ -166,12 +166,18 @@ implementation.
 - Smoke flow: create two departments + users → upload a doc to each → confirm
   each user's chat only ever cites their own department's sources.
 
-## Open decisions (write these ADRs)
+## Decisions and notes
 
-- **0012 — Ingestion worker trust boundary.** Why ingestion runs as a BYPASSRLS
-  role and what that obligates (department_id stamping). Extends ADR-0008.
-- **0013 — Content-addressed blob storage.** The `{blob_root}/{file_hash}` store
-  and the dedup it enables.
+- ~~**0012 — Ingestion worker trust boundary.**~~ Written (ADR-0012). The
+  worker stamps `department_id` from the parent document, and since
+  migration 017 composite foreign keys make the database refuse a chunk,
+  vector or table row whose department is not its parent's — for every
+  role. Keep `(parent_id, department_id)` keys on any new table the worker
+  writes.
+- ~~**0013 — Content-addressed blob storage.**~~ Written (ADR-0013):
+  `{app_data}/blobs/{sha256}`, one file for identical bytes across
+  departments, removed when no live document uses it. Orphans are not
+  collected (known limit).
 - ~~**0014 — PostgreSQL distribution.**~~ Decided and implemented
   (ADR-0014, `db/embedded.rs`, `scripts/fetch-postgres.ps1`): with no
   `*_DATABASE_URL` set the app runs a trimmed PostgreSQL 18 + self-built
