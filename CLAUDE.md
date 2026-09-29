@@ -165,6 +165,10 @@ implementation.
   proof that ADR-0008 holds; treat a failure as a release blocker.
 - Smoke flow: create two departments + users → upload a doc to each → confirm
   each user's chat only ever cites their own department's sources.
+- Table questions: `cargo run --example table_eval` (model servers running)
+  checks the reference questions against hand-written SQL. Run it after
+  touching the planner prompt, the plan checks (`tables/plan.rs`) or the
+  chat model; a new question type gets a case in `examples/table_eval.json`.
 
 ## Decisions and notes
 

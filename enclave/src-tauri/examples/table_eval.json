@@ -1,0 +1,68 @@
+{
+  "about": "Reference questions over the 50 000-row contract registry (ADR-0022/0023/0024). Each expected answer is hand-written SQL over sheet_rows, independent of the planner and the plan compiler; `rows` is that table's rows. Columns: 0 Номер договора, 1 Контрагент, 2 Отдел, 3 Сумма, 4 Дата заключения, 5 Статус, 6 Ответственный, 7 Предмет.",
+  "user": "Anna",
+  "table": { "document": "Реестр договоров 50000.xlsx", "sheet": "Реестр договоров" },
+  "cases": [
+    {
+      "question": "Какая общая сумма договоров Петровой А.С.?",
+      "expect": { "sql": "SELECT sum((cells->>3)::numeric) FROM rows WHERE cells->>6 = 'Петрова А.С.'" }
+    },
+    {
+      "question": "Сколько договоров было заключено в 2021 году?",
+      "expect": { "sql": "SELECT count(*) FROM rows WHERE left(cells->>4, 4) = '2021'" }
+    },
+    {
+      "question": "Сколько договоров по каждому статусу?",
+      "expect": { "sql": "SELECT cells->>5, count(*) FROM rows GROUP BY 1" }
+    },
+    {
+      "question": "Сколько договоров заключено по годам?",
+      "expect": { "sql": "SELECT left(cells->>4, 4), count(*) FROM rows GROUP BY 1" }
+    },
+    {
+      "question": "Какой средний размер договора по отделам?",
+      "expect": { "sql": "SELECT cells->>2, round(avg((cells->>3)::numeric), 2) FROM rows GROUP BY 1" }
+    },
+    {
+      "question": "Какой средний размер договора в отделе Логистика?",
+      "expect": { "sql": "SELECT round(avg((cells->>3)::numeric), 2) FROM rows WHERE cells->>2 = 'Логистика'" }
+    },
+    {
+      "question": "Когда был заключён самый ранний договор отдела ИТ?",
+      "expect": { "sql": "SELECT min(cells->>4) FROM rows WHERE cells->>2 = 'ИТ'" }
+    },
+    {
+      "question": "количество договоров и фамилия ответственного",
+      "expect": { "sql": "SELECT cells->>6, count(*) FROM rows GROUP BY 1" }
+    },
+    {
+      "question": "Какая сумма у договора Д-001234?",
+      "note": "A question about one record goes to search, not to a calculation.",
+      "expect": { "retrieval": "Д-001234" }
+    },
+    {
+      "question": "кол-во договоров и фамилия",
+      "note": "No column named: the app asks which one (ADR-0023).",
+      "picks": ["Ответственный"],
+      "expect": { "sql": "SELECT cells->>6, count(*) FROM rows GROUP BY 1" }
+    },
+    {
+      "question": "Сколько расторгнутых договоров у Сидорова в 2023 году?",
+      "note": "Qwen3-4B drops the status; the app asks to take it into account (ADR-0024).",
+      "picks": ["Учесть", "Только 2023"],
+      "expect": { "sql": "SELECT count(*) FROM rows WHERE cells->>6 LIKE 'Сидоров%' AND cells->>5 = 'расторгнут' AND left(cells->>4, 4) = '2023'" }
+    },
+    {
+      "question": "Сколько действующих договоров у Кузнецовой в 2023 году?",
+      "note": "Two questions back in a row: the surname's column, then the year (ADR-0024).",
+      "picks": ["Учесть", "Только 2023"],
+      "expect": { "sql": "SELECT count(*) FROM rows WHERE cells->>6 LIKE 'Кузнецова%' AND cells->>5 = 'действует' AND left(cells->>4, 4) = '2023'" }
+    },
+    {
+      "question": "Что является предметом договоров?",
+      "note": "Answerable from the text or by listing the column's values; what must not happen is a count with no subject in it (Qwen3-4B's first plan, ADR-0024). If the app asks, the user picks the documents.",
+      "picks": ["Искать в документах"],
+      "expect": { "answer_contains": "Поставка оборудования" }
+    }
+  ]
+}

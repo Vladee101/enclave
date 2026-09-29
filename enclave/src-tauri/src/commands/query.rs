@@ -73,6 +73,9 @@ pub struct Prepared {
     pub sources:       Vec<SourceRef>,
     pub calculation:   Option<String>,
     pub clarification: Option<plan::Clarification>,
+    /// The calculation itself — plan and result groups — for tools that
+    /// check the numbers (`examples/table_eval.rs`); the UI gets the text.
+    pub computation:   Option<plan::Computation>,
 }
 
 /// Shared prep for both blocking and streaming query commands (and the
@@ -176,6 +179,7 @@ pub async fn prepare(
                 sources: Vec::new(),
                 calculation: None,
                 clarification: Some(clarification),
+                computation: None,
             });
         }
 
@@ -218,6 +222,7 @@ pub async fn prepare(
                 sources: into_sources(chunks),
                 calculation: None,
                 clarification: None,
+                computation: None,
             })
         }
     }
@@ -279,6 +284,7 @@ async fn prepare_chosen(
             sources: Vec::new(),
             calculation: None,
             clarification: Some(clarification),
+            computation: None,
         });
     }
     let computation = plan::execute(&mut tx, &candidates, plan).await.map_err(e)?;
@@ -317,6 +323,7 @@ async fn computed(
         }],
         calculation: Some(description),
         clarification: None,
+        computation: Some(computation.clone()),
     })
 }
 
@@ -436,7 +443,7 @@ pub async fn cmd_query(
 ) -> Result<QueryResult, AppError> {
     let user_id = session.require()?.id;
     let llm = require_llm(&llm)?;
-    let Prepared { prompt, answer, lora, sources, calculation, clarification } =
+    let Prepared { prompt, answer, lora, sources, calculation, clarification, .. } =
         prepare(&state.app_pool, llm, user_id, &args).await?;
     if let Some(answer) = answer {
         return Ok(QueryResult { answer, sources, calculation, clarification });
@@ -474,7 +481,7 @@ pub async fn cmd_query_stream(
 ) -> Result<QueryResult, AppError> {
     let user_id = session.require()?.id;
     let llm = require_llm(&llm)?;
-    let Prepared { prompt, answer, lora, sources, calculation, clarification } =
+    let Prepared { prompt, answer, lora, sources, calculation, clarification, .. } =
         prepare(&state.app_pool, llm, user_id, &args).await?;
     let event_name = format!("llm-token:{request_id}");
     if let Some(answer) = answer {

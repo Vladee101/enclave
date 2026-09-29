@@ -69,6 +69,12 @@ Without the env vars the DB tests skip silently; `ENCLAVE_REQUIRE_*` makes
 them fail instead. `backup_roundtrip` needs `binaries/pg` (skipped in CI).
 CI runs on PostgreSQL 16 and 18.
 
+**Table-question eval** (model servers up — e.g. a running dev app — and
+the 50 000-row registry ingested for the case file's user):
+`ADMIN_DATABASE_URL=… APP_DATABASE_URL=… cargo run --example table_eval`.
+Run it after any change to the planner prompt, the plan checks or the
+model; last run 13 / 13 on Qwen3-4B.
+
 **Installer:** `powershell -File .\scripts\build-installer.ps1` →
 `target\release\bundle\nsis\Enclave_0.1.0_x64-setup.exe`. Bundle settings
 live in `src-tauri/tauri.bundle.json`, merged only by that script.
@@ -94,6 +100,9 @@ live in `src-tauri/tauri.bundle.json`, merged only by that script.
   extra columns and a duplicate HNSW index no migration creates. Code that
   works only there is a bug; add startup statements to
   `tests/schema_contract.rs`.
+- **Stopping a backgrounded `pnpm tauri dev` leaves children running**
+  (`enclave.exe`, both `llama-server.exe`, Vite on 1420); stop them too, or
+  the next run fails on the port.
 - **git push over this network** fails intermittently with TLS handshake
   errors; retry.
 
@@ -105,8 +114,6 @@ live in `src-tauri/tauri.bundle.json`, merged only by that script.
 - **Code signing** (SmartScreen warns about an unknown publisher).
 - **LoRA adapters:** wired end to end, never exercised with a real adapter.
 - **OCR:** scanned PDFs without a text layer are not read.
-- **Table-question eval script:** the 12 reference questions are checked by
-  hand only.
 - **Backups:** no encryption, no schedule (ADR-0026).
 - **Model download errors** arrive as events with English text; not coded.
 
