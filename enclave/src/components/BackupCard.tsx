@@ -36,7 +36,7 @@ function stageText(t: TFunc, p: Progress | null): string {
  * replaces the data on the next start.
  */
 export function BackupCard() {
-  const { t, tPlural, formatDateTime, formatSize } = useI18n();
+  const { t, tError, tPlural, formatDateTime, formatSize } = useI18n();
   const mb = (bytes: number) => formatSize(bytes, 'MB');
   const [busy,     setBusy]     = useState<'backup' | 'restore' | null>(null);
   const [progress, setProgress] = useState<Progress | null>(null);
@@ -45,7 +45,7 @@ export function BackupCard() {
   const [error,    setError]    = useState<string | null>(null);
 
   useEffect(() => {
-    invoke<Staged | null>('cmd_backup_staged').then(setStaged).catch(e => setError(String(e)));
+    invoke<Staged | null>('cmd_backup_staged').then(setStaged).catch(e => setError(tError(e)));
     const unlisten = listen<Progress>('backup-progress', e => setProgress(e.payload));
     return () => { unlisten.then(f => f()); };
   }, []);
@@ -61,7 +61,7 @@ export function BackupCard() {
     try {
       setMade(await invoke<BackupSummary>('cmd_backup_create', { path }));
     } catch (e) {
-      setError(String(e));
+      setError(tError(e));
     } finally {
       setBusy(null);
     }
@@ -79,7 +79,7 @@ export function BackupCard() {
     try {
       b = await invoke<BackupSummary>('cmd_backup_inspect', { path });
     } catch (e) {
-      setError(String(e));
+      setError(tError(e));
       return;
     }
     if (!window.confirm(
@@ -96,7 +96,7 @@ export function BackupCard() {
     try {
       setStaged(await invoke<Staged>('cmd_backup_restore', { path }));
     } catch (e) {
-      setError(String(e));
+      setError(tError(e));
     } finally {
       setBusy(null);
     }
@@ -108,7 +108,7 @@ export function BackupCard() {
       await invoke('cmd_backup_cancel_restore');
       setStaged(null);
     } catch (e) {
-      setError(String(e));
+      setError(tError(e));
     }
   }
 
@@ -134,7 +134,7 @@ export function BackupCard() {
             })}
           </div>
           <div className="flex gap-3" style={{ marginTop: 10 }}>
-            <Button onClick={() => invoke('cmd_restart_app').catch(e => setError(String(e)))}>{t('common.restartNow')}</Button>
+            <Button onClick={() => invoke('cmd_restart_app').catch(e => setError(tError(e)))}>{t('common.restartNow')}</Button>
             <Button variant="ghost" onClick={cancelRestore}>{t('backup.keepCurrent')}</Button>
           </div>
         </div>

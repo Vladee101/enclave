@@ -38,7 +38,7 @@ impl Session {
 
     /// The signed-in user, or the error every user-scoped command returns
     /// when nobody is.
-    pub fn require(&self) -> Result<SessionUser, String> {
-        self.get().ok_or_else(|| "Not signed in.".to_string())
+    pub fn require(&self) -> Result<SessionUser, crate::error::AppError> {
+        self.get().ok_or_else(|| crate::error::AppError::new("not_signed_in", "Not signed in."))
     }
 }

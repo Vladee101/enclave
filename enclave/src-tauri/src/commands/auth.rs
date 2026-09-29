@@ -1,3 +1,4 @@
+use crate::error::AppError;
 use argon2::{
     Argon2,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
@@ -20,12 +21,12 @@ pub struct UserInfo {
     pub is_admin: bool,
 }
 
-fn hash_pin(pin: &str) -> Result<String, String> {
+fn hash_pin(pin: &str) -> Result<String, AppError> {
     let salt = SaltString::generate(&mut OsRng);
     Argon2::default()
         .hash_password(pin.as_bytes(), &salt)
         .map(|h| h.to_string())
-        .map_err(|e| e.to_string())
+        .map_err(AppError::of)
 }
 
 fn verify_pin(pin: &str, stored_hash: &str) -> bool {
@@ -38,11 +39,11 @@ fn verify_pin(pin: &str, stored_hash: &str) -> bool {
 /// List all local user profiles (used by the login screen profile picker).
 /// Uses admin_pool: app_user has no current_user_id context at this stage.
 #[tauri::command]
-pub async fn cmd_list_users(state: State<'_, AppState>) -> Result<Vec<UserInfo>, String> {
+pub async fn cmd_list_users(state: State<'_, AppState>) -> Result<Vec<UserInfo>, AppError> {
     sqlx::query_as::<_, UserInfo>("SELECT id, username, is_admin FROM users ORDER BY username")
         .fetch_all(&state.admin_pool)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(AppError::of)
 }
 
 /// Create a new local user profile with a PIN and membership in the shared
@@ -58,10 +59,10 @@ pub async fn cmd_create_user(
     state:   State<'_, AppState>,
     session: State<'_, Session>,
     args:    CreateUserArgs,
-) -> Result<UserInfo, String> {
+) -> Result<UserInfo, AppError> {
     let pin_hash = hash_pin(&args.pin)?;
 
-    let mut tx = state.admin_pool.begin().await.map_err(|e| e.to_string())?;
+    let mut tx = state.admin_pool.begin().await.map_err(AppError::of)?;
 
     // Bootstrap: whoever creates a profile while no admin exists yet becomes
     // the admin (CLAUDE.md task 11). Deliberately "no admin exists" rather
@@ -73,7 +74,7 @@ pub async fn cmd_create_user(
     let existing_admins: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE is_admin = true")
         .fetch_one(&mut *tx)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(AppError::of)?;
     let is_admin = existing_admins == 0;
 
     let user = sqlx::query_as::<_, UserInfo>(
@@ -85,7 +86,13 @@ pub async fn cmd_create_user(
     .bind(is_admin)
     .fetch_one(&mut *tx)
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| match e.as_database_error().and_then(|d| d.code()) {
+        Some(code) if code == "23505" => {
+            AppError::new("username_taken", format!("A profile named {} already exists.", args.username))
+                .with("name", &args.username)
+        }
+        _ => AppError::of(e),
+    })?;
 
     // The shared default department (migrations/010, ADR-0016) — the only
     // membership a new profile gets. Departments are access grants, and
@@ -103,7 +110,7 @@ pub async fn cmd_create_user(
     .bind(dept_id)
     .execute(&mut *tx)
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(AppError::of)?;
 
     // Profiles are created from the login screen, usually with nobody
     // signed in — then the new user is recorded as creating themselves.
@@ -116,9 +123,9 @@ pub async fn cmd_create_user(
         serde_json::json!({ "user_id": user.id, "username": user.username, "is_admin": user.is_admin }),
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(AppError::of)?;
 
-    tx.commit().await.map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(AppError::of)?;
 
     Ok(user)
 }
@@ -144,14 +151,14 @@ pub async fn cmd_login(
     state:   State<'_, AppState>,
     session: State<'_, Session>,
     args:    LoginArgs,
-) -> Result<LoginResult, String> {
+) -> Result<LoginResult, AppError> {
     let row = sqlx::query(
         "SELECT id, username, password_hash, is_admin FROM users WHERE id = $1",
     )
     .bind(args.user_id)
     .fetch_optional(&state.admin_pool)
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(AppError::of)?;
 
     let empty = LoginResult { ok: false, user_id: None, username: None, is_admin: None };
 
@@ -191,7 +198,7 @@ pub async fn cmd_login(
 pub async fn cmd_logout(
     state:   State<'_, AppState>,
     session: State<'_, Session>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     if let Some(user) = session.get() {
         record_on_admin_pool(&state, Some(user.id), event::LOGOUT).await?;
     }
@@ -203,15 +210,15 @@ pub async fn cmd_logout(
 /// this on startup instead of keeping its own copy, so the UI can never
 /// show a user the core does not have a session for.
 #[tauri::command]
-pub async fn cmd_current_session(session: State<'_, Session>) -> Result<Option<SessionUser>, String> {
+pub async fn cmd_current_session(session: State<'_, Session>) -> Result<Option<SessionUser>, AppError> {
     Ok(session.get())
 }
 
 /// Login/logout run before or after a user context exists, so their audit
 /// rows go through admin_pool — the same pool that verifies the PIN.
-async fn record_on_admin_pool(state: &State<'_, AppState>, user_id: Option<Uuid>, event_type: &str) -> Result<(), String> {
-    let mut conn = state.admin_pool.acquire().await.map_err(|e| e.to_string())?;
+async fn record_on_admin_pool(state: &State<'_, AppState>, user_id: Option<Uuid>, event_type: &str) -> Result<(), AppError> {
+    let mut conn = state.admin_pool.acquire().await.map_err(AppError::of)?;
     audit::record(&mut conn, user_id, None, event_type, serde_json::json!({}))
         .await
-        .map_err(|e| e.to_string())
+        .map_err(AppError::of)
 }

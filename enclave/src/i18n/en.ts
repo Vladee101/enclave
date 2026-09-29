@@ -167,6 +167,37 @@ export const en = {
     downloading: 'Downloading…',
     resume: 'Resume download',
     download: 'Download',
+    // Items by key; {name} is the model's or build's own name, as is.
+    itemChat: '{name} (answers)',
+    itemEmbed: '{name} (search)',
+    itemEngine: 'llama.cpp engine ({name})',
+    itemCudaRuntime: 'CUDA runtime for the engine',
+  },
+
+  // Errors the core returns with a code (src-tauri/src/error.rs); the
+  // params are interpolated. A code missing here shows the core's own
+  // message — `internal` (database, disk) always does.
+  errors: {
+    not_signed_in: 'Not signed in.',
+    admin_required: 'Admin privileges required.',
+    default_department_protected: 'The default department cannot be deleted.',
+    department_not_found: 'Department not found.',
+    document_delete_forbidden: 'Only the uploader or an administrator can delete this document.',
+    document_not_found: 'Document not found.',
+    username_taken: 'A profile named "{name}" already exists.',
+    table_gone: 'The table is no longer available.',
+    option_not_calculation: 'The chosen option is not a calculation.',
+    model_unavailable: 'The model is not running, so questions cannot be answered. Check that the models are installed and restart Enclave.',
+    model_not_gguf: '{path} is not a GGUF model file.',
+    restart_dev_build: 'Development build: close Enclave and start it again with `pnpm tauri dev`.',
+    backup_busy: 'A backup or restore is already running.',
+    restore_server_mode: "Enclave is using a PostgreSQL server, not its own database: restore that server's data with the server's own tools.",
+    backup_not_archive: 'This is not an Enclave backup.',
+    backup_damaged: 'The backup is damaged: {entry} does not match its checksum.',
+    backup_incomplete: 'The backup is incomplete: {count} document file(s) are missing from it.',
+    backup_format: 'Backup format {format} is not supported by this version of Enclave.',
+    backup_newer: 'This backup was made by a newer Enclave ({version}). Update Enclave first.',
+    backup_migration: 'The database in the backup could not be brought up to this version of Enclave.',
   },
 
   docsPanel: {

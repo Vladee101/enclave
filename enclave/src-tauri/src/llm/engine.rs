@@ -190,11 +190,7 @@ pub fn status(app: &AppHandle) -> Result<Vec<ModelStatus>> {
             let partial = std::fs::metadata(dir.with_file_name(format!("{}.part", a.file))).map(|m| m.len()).unwrap_or(0);
             ModelStatus {
                 key: a.key,
-                label: if a.key == "engine" {
-                    format!("llama.cpp engine ({})", f.label())
-                } else {
-                    "CUDA runtime for the engine".to_string()
-                },
+                name: if a.key == "engine" { f.label() } else { "CUDA" }.to_string(),
                 state: if ready { "ready" } else { "missing" },
                 size: a.size,
                 partial,

@@ -185,6 +185,14 @@ implementation.
   checked, restored into `enclave_restore`, migrated, then swapped in by
   `backup::apply_staged` at the next start, before any pool connects.
   Embedded database only.
+- **User-facing errors carry a code** (`src-tauri/src/error.rs`). Commands
+  return `AppError {code, params, message}`; the UI words it from
+  `errors.<code>` in `src/i18n/{en,ru}.ts` and falls back to the English
+  `message`. An error a user can meet in normal use gets a code (and a
+  line in both dictionaries); database and I/O failures stay `internal`.
+  Deep in `anyhow` code, raise it with `bail!(AppError::new(…))` and
+  convert at the command with `AppError::from_anyhow`. The core never
+  sends UI wording; proper names (files, columns, models) go as they are.
 - **The schema is what the migrations build.** The dev database was once
   hand-built from `db/schema.sql` and still has columns no migration
   creates; code that relies on one works there and fails on every new

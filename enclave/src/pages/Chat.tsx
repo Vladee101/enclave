@@ -29,7 +29,7 @@ type ScopeDoc = Pick<DocInfo, 'id' | 'filename'>;
 
 export function ChatPage() {
   const { user } = useAuth();
-  const { t } = useI18n();
+  const { t, tError } = useI18n();
   const { partial, sources, calculation, clarification, streaming, ask } = useLlmStream();
   const [messages, setMessages]   = useState<Message[]>([]);
   const [input,    setInput]      = useState('');
@@ -107,7 +107,7 @@ export function ChatPage() {
       await ask(q, 5, plan, limitTo.map(d => d.id));
     } catch (e) {
       setMessages(prev => prev.map(m => (
-        m.id === botId ? { ...m, content: t('chat.error', { error: String(e) }) } : m
+        m.id === botId ? { ...m, content: t('chat.error', { error: tError(e) }) } : m
       )));
     } finally {
       streamingId.current = null;

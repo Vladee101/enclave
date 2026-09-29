@@ -36,6 +36,7 @@ use zip::write::SimpleFileOptions;
 use zip::CompressionMethod;
 
 use crate::db::embedded::{self, DATABASE};
+use crate::error::AppError;
 
 /// Bumped when the archive layout changes; a build reads only its own.
 pub const FORMAT: u32 = 1;
@@ -290,14 +291,14 @@ pub fn read_manifest(archive: &Path) -> Result<Manifest> {
 
 fn open_archive(archive: &Path) -> Result<zip::ZipArchive<File>> {
     let file = File::open(archive).with_context(|| format!("could not open {}", archive.display()))?;
-    zip::ZipArchive::new(file).context("not an Enclave backup (not a ZIP archive)")
+    Ok(zip::ZipArchive::new(file).map_err(|_| not_a_backup())?)
 }
 
 fn manifest_of(zip: &mut zip::ZipArchive<File>) -> Result<Manifest> {
-    let mut entry = zip.by_name(MANIFEST).context("not an Enclave backup (no manifest)")?;
+    let mut entry = zip.by_name(MANIFEST).map_err(|_| not_a_backup())?;
     let mut bytes = Vec::new();
     entry.read_to_end(&mut bytes)?;
-    let manifest: Manifest = serde_json::from_slice(&bytes).context("the backup's manifest is damaged")?;
+    let manifest: Manifest = serde_json::from_slice(&bytes).map_err(|_| damaged(MANIFEST))?;
     check_restorable(&manifest)?;
     Ok(manifest)
 }
@@ -305,21 +306,49 @@ fn manifest_of(zip: &mut zip::ZipArchive<File>) -> Result<Manifest> {
 fn check_restorable(manifest: &Manifest) -> Result<()> {
     ensure!(
         manifest.format == FORMAT,
-        "backup format {} is not supported by this version of Enclave (it reads format {FORMAT})",
-        manifest.format
+        AppError::new(
+            "backup_format",
+            format!("backup format {} is not supported by this version of Enclave (it reads format {FORMAT})", manifest.format),
+        )
+        .with("format", manifest.format)
     );
     let latest = crate::db::latest_migration();
     ensure!(
         manifest.migration <= latest,
-        "this backup was made by a newer Enclave ({}, database version {}); this one knows up to {latest} — update Enclave first",
-        manifest.app_version,
-        manifest.migration
+        AppError::new(
+            "backup_newer",
+            format!(
+                "this backup was made by a newer Enclave ({}, database version {}); this one knows up to {latest} — update Enclave first",
+                manifest.app_version, manifest.migration
+            ),
+        )
+        .with("version", &manifest.app_version)
     );
     for hash in manifest.blobs.iter().map(|b| &b.sha256).chain(&manifest.missing) {
         // Names are joined onto a directory below: nothing but a hash.
-        ensure!(is_sha256(hash), "the backup's manifest is damaged (bad file name {hash:?})");
+        ensure!(is_sha256(hash), damaged(MANIFEST));
     }
     Ok(())
+}
+
+// The errors a user can meet restoring a backup, coded for the UI
+// (`crate::error`).
+
+fn not_a_backup() -> AppError {
+    AppError::new("backup_not_archive", "not an Enclave backup")
+}
+
+fn damaged(entry: &str) -> AppError {
+    AppError::new("backup_damaged", format!("the backup is damaged: {entry} does not match its checksum"))
+        .with("entry", entry)
+}
+
+fn incomplete(count: usize) -> AppError {
+    AppError::new(
+        "backup_incomplete",
+        format!("the backup is incomplete: {count} document file(s) are neither in it nor listed as missing"),
+    )
+    .with("count", count)
 }
 
 fn is_sha256(s: &str) -> bool {
@@ -345,14 +374,11 @@ fn extract_checked(archive: &Path, dir: &Path, progress: &(dyn Fn(Progress) + Se
 }
 
 fn extract_entry(zip: &mut zip::ZipArchive<File>, name: &str, to: &Path, expected: &Entry) -> Result<()> {
-    let mut entry = zip.by_name(name).with_context(|| format!("the backup is incomplete: {name} is missing"))?;
+    let mut entry = zip.by_name(name).map_err(|_| incomplete(1))?;
     let mut out = File::create(to).with_context(|| format!("could not write {}", to.display()))?;
     let sha256 = copy_hashing(&mut entry, &mut out)?;
     let size = out.metadata()?.len();
-    ensure!(
-        size == expected.size && sha256 == expected.sha256,
-        "the backup is damaged: {name} does not match its checksum"
-    );
+    ensure!(size == expected.size && sha256 == expected.sha256, damaged(name));
     Ok(())
 }
 
@@ -412,7 +438,9 @@ async fn stage_inner(
     // migration that fails fails here, not on the next start.
     let staged_db = sqlx::PgPool::connect(&staging_url).await?;
     let checked = async {
-        crate::db::MIGRATOR.run(&staged_db).await.context("the backup's database could not be migrated")?;
+        crate::db::MIGRATOR.run(&staged_db).await.map_err(|e| {
+            AppError::new("backup_migration", format!("the backup's database could not be migrated: {e}"))
+        })?;
         let live: Vec<String> =
             sqlx::query_scalar("SELECT DISTINCT file_hash FROM documents WHERE deleted_at IS NULL")
                 .fetch_all(&staged_db)
@@ -436,7 +464,7 @@ fn check_files(manifest: &Manifest, live: &[String]) -> Result<()> {
     let present: HashSet<&str> =
         manifest.blobs.iter().map(|b| b.sha256.as_str()).chain(manifest.missing.iter().map(String::as_str)).collect();
     let absent = live.iter().filter(|h| !present.contains(h.as_str())).count();
-    ensure!(absent == 0, "the backup is incomplete: {absent} document file(s) are neither in it nor listed as missing");
+    ensure!(absent == 0, incomplete(absent));
     Ok(())
 }
 

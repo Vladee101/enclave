@@ -1,3 +1,4 @@
+use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use tauri::{AppHandle, Emitter, State};
@@ -98,7 +99,7 @@ pub async fn prepare(
     llm:     &LlmClient,
     user_id: Uuid,
     args:    &QueryArgs,
-) -> Result<Prepared, String> {
+) -> Result<Prepared, AppError> {
     // A chosen plan is either a calculation, or "answer from the documents"
     // ({"answerable": false}, offered in every clarification): then the
     // planner is not asked again.
@@ -230,7 +231,7 @@ async fn prepare_chosen(
     user_id: Uuid,
     args:    &QueryArgs,
     chosen:  &ChosenPlan,
-) -> Result<Prepared, String> {
+) -> Result<Prepared, AppError> {
     let top_k = args.top_k.unwrap_or(5);
     let e = |e: anyhow::Error| e.to_string();
     let db = |e: sqlx::Error| e.to_string();
@@ -241,11 +242,11 @@ async fn prepare_chosen(
     let candidate = plan::load_candidate(&mut tx, chosen.table_id)
         .await
         .map_err(e)?
-        .ok_or_else(|| "The table is no longer available.".to_string())?;
+        .ok_or_else(|| AppError::new("table_gone", "The table is no longer available."))?;
     let candidates = [candidate];
     let plan = plan::parse_plan(&chosen.plan.to_string(), &candidates)
         .map_err(e)?
-        .ok_or_else(|| "The chosen option is not a calculation.".to_string())?;
+        .ok_or_else(|| AppError::new("option_not_calculation", "The chosen option is not a calculation."))?;
 
     // Checked again, minus what the user already settled: a second problem
     // must not hide behind the first (ADR-0023).
@@ -294,14 +295,14 @@ async fn computed(
     lora:        Vec<crate::llm::LoraEntry>,
     computation: &plan::Computation,
     question:    &str,
-) -> Result<Prepared, String> {
+) -> Result<Prepared, AppError> {
     let description = computation.describe();
     let answer = computation.grouped_answer();
     let prompt = match answer {
         Some(_) => String::new(),
         None => {
             let (system, user) = plan::answer_messages(computation, question);
-            llm.apply_template(system, &user).await.map_err(|e| e.to_string())?
+            llm.apply_template(system, &user).await.map_err(AppError::of)?
         }
     };
     Ok(Prepared {
@@ -421,8 +422,8 @@ const SIDECAR_UNAVAILABLE: &str =
 /// start — NFR7 graceful degradation). Tauri looks state up by exact type,
 /// so commands must take `State<'_, Option<LlmClient>>` and unwrap here,
 /// the same way `ingest::jobs::tick` does.
-fn require_llm(llm: &Option<LlmClient>) -> Result<&LlmClient, String> {
-    llm.as_ref().ok_or_else(|| SIDECAR_UNAVAILABLE.to_string())
+fn require_llm(llm: &Option<LlmClient>) -> Result<&LlmClient, AppError> {
+    llm.as_ref().ok_or_else(|| AppError::new("model_unavailable", SIDECAR_UNAVAILABLE))
 }
 
 /// Main RAG + LoRA query pipeline (ADR-0004, 0006), non-streaming.
@@ -432,7 +433,7 @@ pub async fn cmd_query(
     session: State<'_, Session>,
     llm:     State<'_, Option<LlmClient>>,
     args:    QueryArgs,
-) -> Result<QueryResult, String> {
+) -> Result<QueryResult, AppError> {
     let user_id = session.require()?.id;
     let llm = require_llm(&llm)?;
     let Prepared { prompt, answer, lora, sources, calculation, clarification } =
@@ -449,7 +450,7 @@ pub async fn cmd_query(
         stream: false,
         json_schema: None,
     };
-    let answer = llm.complete(&req).await.map_err(|e| e.to_string())?;
+    let answer = llm.complete(&req).await.map_err(AppError::of)?;
 
     Ok(QueryResult { answer, sources, calculation, clarification: None })
 }
@@ -470,7 +471,7 @@ pub async fn cmd_query_stream(
     llm:        State<'_, Option<LlmClient>>,
     request_id: String,
     args:       QueryArgs,
-) -> Result<QueryResult, String> {
+) -> Result<QueryResult, AppError> {
     let user_id = session.require()?.id;
     let llm = require_llm(&llm)?;
     let Prepared { prompt, answer, lora, sources, calculation, clarification } =
@@ -496,7 +497,7 @@ pub async fn cmd_query_stream(
             let _ = app.emit(&event_name, StreamToken { token: token.to_string() });
         })
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(AppError::of)?;
 
     Ok(QueryResult { answer, sources, calculation, clarification: None })
 }
@@ -508,6 +509,6 @@ mod tests {
     #[test]
     fn require_llm_none_is_clear_error() {
         let Err(err) = require_llm(&None) else { panic!("expected an error") };
-        assert_eq!(err, SIDECAR_UNAVAILABLE);
+        assert_eq!((err.code, err.message.as_str()), ("model_unavailable", SIDECAR_UNAVAILABLE));
     }
 }

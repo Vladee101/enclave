@@ -81,7 +81,7 @@ function deptLabel(d: Dept, t: TFunc): string {
 
 export function DocumentsPage() {
   const { user } = useAuth();
-  const { t } = useI18n();
+  const { t, tError } = useI18n();
   const [docs,        setDocs]    = useState<DocInfo[]>([]);
   const [pendingJobs, setPending] = useState<Record<string, string>>({});  // doc_id → job_id
   const [dragOver,    setDragOver] = useState(false);
@@ -144,7 +144,7 @@ export function DocumentsPage() {
       setPending(prev => ({ ...prev, [job.document_id]: job.job_id }));
       track(job.job_id);
     } catch (e) {
-      setError(t('documents.uploadFailed', { name: file.name, error: String(e) }));
+      setError(t('documents.uploadFailed', { name: file.name, error: tError(e) }));
     }
   }
 
@@ -155,7 +155,7 @@ export function DocumentsPage() {
       await invoke('cmd_delete_document', { documentId: doc.id });
       setDocs(prev => prev.filter(d => d.id !== doc.id));
     } catch (e) {
-      setError(String(e));
+      setError(tError(e));
     }
   }
 

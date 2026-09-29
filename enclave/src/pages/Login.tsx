@@ -13,7 +13,7 @@ interface UserInfo {
 
 export function LoginPage() {
   const { login } = useAuth();
-  const { t } = useI18n();
+  const { t, tError } = useI18n();
   const [users,       setUsers]       = useState<UserInfo[]>([]);
   const [selectedId,  setSelectedId]  = useState<string>('');
   const [pin,         setPin]         = useState('');
@@ -45,7 +45,7 @@ export function LoginPage() {
       setShowCreate(false);
       setNewUsername(''); setNewPin('');
     } catch (err: any) {
-      setError(String(err));
+      setError(tError(err));
     } finally { setLoading(false); }
   }
 

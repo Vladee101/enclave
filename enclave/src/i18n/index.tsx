@@ -97,6 +97,11 @@ interface I18nValue {
   formatDateTime: (iso: string) => string;
   /** Locale-aware number (grouping separators) for the current language. */
   formatNumber: (n: number) => string;
+  /**
+   * Text for an error from `invoke`: the core's `{code, params, message}`
+   * (src-tauri/src/error.rs) in this language, else its message as is.
+   */
+  tError: (e: unknown) => string;
   /** Bytes as megabytes (1 decimal) or gigabytes (2): «194,5 МБ», "2.50 GB". */
   formatSize: (bytes: number, unit: 'MB' | 'GB') => string;
 }
@@ -164,8 +169,22 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     [lang],
   );
 
+  const tError = useCallback(
+    (e: unknown): string => {
+      if (e && typeof e === 'object' && 'code' in e) {
+        const { code, params, message } = e as { code: string; params?: Vars; message?: string };
+        const template = (DICTS[lang].errors as Record<string, string>)[code];
+        if (template) return interpolate(template, params ?? {});
+        if (message) return message;
+      }
+      if (e instanceof Error) return e.message;
+      return String(e);
+    },
+    [lang],
+  );
+
   return (
-    <I18nContext.Provider value={{ lang, setLang, t, tPlural, formatDateTime, formatNumber, formatSize }}>
+    <I18nContext.Provider value={{ lang, setLang, t, tPlural, tError, formatDateTime, formatNumber, formatSize }}>
       {children}
     </I18nContext.Provider>
   );

@@ -1,3 +1,4 @@
+use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Digest};
 use sqlx::FromRow;
@@ -53,11 +54,11 @@ pub async fn cmd_upload_document(
     state:   State<'_, AppState>,
     session: State<'_, Session>,
     args:    UploadArgs,
-) -> Result<JobStatus, String> {
+) -> Result<JobStatus, AppError> {
     let user_id = session.require()?.id;
     // Refuse what ingestion cannot read before anything is stored: an
     // immediate error beats a job that fails a minute later (ADR-0019).
-    crate::ingest::extract::check_supported(&args.filename).map_err(|e| e.to_string())?;
+    crate::ingest::extract::check_supported(&args.filename).map_err(AppError::of)?;
     let digest = Sha256::digest(&args.file_contents);
     let file_hash: String = digest.iter().map(|b| format!("{b:02x}")).collect();
     let byte_size = args.file_contents.len() as i64;
@@ -66,14 +67,14 @@ pub async fn cmd_upload_document(
     // Content-addressed blob store (CLAUDE.md): {data_dir}/blobs/{file_hash}.
     // Write before the DB insert so the ingestion worker never sees a
     // documents row pointing at bytes that aren't on disk yet.
-    let blob_dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join("blobs");
-    tokio::fs::create_dir_all(&blob_dir).await.map_err(|e| e.to_string())?;
+    let blob_dir = app.path().app_data_dir().map_err(AppError::of)?.join("blobs");
+    tokio::fs::create_dir_all(&blob_dir).await.map_err(AppError::of)?;
     tokio::fs::write(blob_dir.join(&file_hash), &args.file_contents)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(AppError::of)?;
 
-    let mut tx = state.app_pool.begin().await.map_err(|e| e.to_string())?;
-    set_current_user(&mut tx, user_id).await.map_err(|e| e.to_string())?;
+    let mut tx = state.app_pool.begin().await.map_err(AppError::of)?;
+    set_current_user(&mut tx, user_id).await.map_err(AppError::of)?;
 
     // ON CONFLICT rather than a pre-check: two concurrent uploads of the same
     // file must not race each other into the unique index. It covers live
@@ -96,7 +97,7 @@ pub async fn cmd_upload_document(
     .bind(user_id)
     .fetch_optional(&mut *tx)
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(AppError::of)?;
 
     let doc_id = match inserted {
         Some(id) => id,
@@ -111,7 +112,7 @@ pub async fn cmd_upload_document(
             .bind(&file_hash)
             .fetch_one(&mut *tx)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(AppError::of)?;
 
             let latest_job = sqlx::query_as::<_, JobStatus>(
                 r#"
@@ -125,7 +126,7 @@ pub async fn cmd_upload_document(
             .bind(id)
             .fetch_optional(&mut *tx)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(AppError::of)?;
 
             // Requeue when either side says it failed: documents stranded in
             // 'pending' behind a failed job exist in databases written by
@@ -134,7 +135,7 @@ pub async fn cmd_upload_document(
             if status != "failed" && !job_failed {
                 if let Some(job) = latest_job {
                     // Nothing changed, so nothing to audit.
-                    tx.commit().await.map_err(|e| e.to_string())?;
+                    tx.commit().await.map_err(AppError::of)?;
                     return Ok(job);
                 }
             }
@@ -143,7 +144,7 @@ pub async fn cmd_upload_document(
                 .bind(id)
                 .execute(&mut *tx)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(AppError::of)?;
             id
         }
     };
@@ -154,7 +155,7 @@ pub async fn cmd_upload_document(
     .bind(doc_id)
     .fetch_one(&mut *tx)
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(AppError::of)?;
 
     audit::record(
         &mut tx,
@@ -164,9 +165,9 @@ pub async fn cmd_upload_document(
         serde_json::json!({ "document_id": doc_id, "job_id": job_id, "file_hash": file_hash, "byte_size": byte_size, "reupload": inserted.is_none() }),
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(AppError::of)?;
 
-    tx.commit().await.map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(AppError::of)?;
 
     Ok(JobStatus {
         job_id,
@@ -189,10 +190,10 @@ pub async fn cmd_upload_document(
 pub async fn cmd_list_documents(
     state:   State<'_, AppState>,
     session: State<'_, Session>,
-) -> Result<Vec<DocumentInfo>, String> {
+) -> Result<Vec<DocumentInfo>, AppError> {
     let user_id = session.require()?.id;
-    let mut tx = state.app_pool.begin().await.map_err(|e| e.to_string())?;
-    set_current_user(&mut tx, user_id).await.map_err(|e| e.to_string())?;
+    let mut tx = state.app_pool.begin().await.map_err(AppError::of)?;
+    set_current_user(&mut tx, user_id).await.map_err(AppError::of)?;
 
     let docs = sqlx::query_as::<_, DocumentInfo>(
         r#"
@@ -206,9 +207,9 @@ pub async fn cmd_list_documents(
     )
     .fetch_all(&mut *tx)
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(AppError::of)?;
 
-    tx.commit().await.map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(AppError::of)?;
     Ok(docs)
 }
 
@@ -238,10 +239,10 @@ pub struct ColumnOutline {
 pub async fn cmd_list_document_tables(
     state:   State<'_, AppState>,
     session: State<'_, Session>,
-) -> Result<Vec<TableOutline>, String> {
+) -> Result<Vec<TableOutline>, AppError> {
     let user_id = session.require()?.id;
-    let mut tx = state.app_pool.begin().await.map_err(|e| e.to_string())?;
-    set_current_user(&mut tx, user_id).await.map_err(|e| e.to_string())?;
+    let mut tx = state.app_pool.begin().await.map_err(AppError::of)?;
+    set_current_user(&mut tx, user_id).await.map_err(AppError::of)?;
 
     let rows: Vec<(Uuid, String, i32, serde_json::Value)> = sqlx::query_as(
         r#"
@@ -254,12 +255,12 @@ pub async fn cmd_list_document_tables(
     )
     .fetch_all(&mut *tx)
     .await
-    .map_err(|e| e.to_string())?;
-    tx.commit().await.map_err(|e| e.to_string())?;
+    .map_err(AppError::of)?;
+    tx.commit().await.map_err(AppError::of)?;
 
     rows.into_iter()
         .map(|(document_id, sheet, row_count, columns)| {
-            let columns: Vec<crate::tables::Column> = serde_json::from_value(columns).map_err(|e| e.to_string())?;
+            let columns: Vec<crate::tables::Column> = serde_json::from_value(columns).map_err(AppError::of)?;
             Ok(TableOutline {
                 document_id,
                 sheet,
@@ -285,10 +286,10 @@ pub async fn cmd_delete_document(
     state:       State<'_, AppState>,
     session:     State<'_, Session>,
     document_id: Uuid,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let user_id = session.require()?.id;
-    let mut tx = state.app_pool.begin().await.map_err(|e| e.to_string())?;
-    set_current_user(&mut tx, user_id).await.map_err(|e| e.to_string())?;
+    let mut tx = state.app_pool.begin().await.map_err(AppError::of)?;
+    set_current_user(&mut tx, user_id).await.map_err(AppError::of)?;
 
     let (file_hash, department_id, blob_still_used): (String, Uuid, bool) =
         sqlx::query_as("SELECT file_hash, department_id, blob_still_used FROM delete_document($1)")
@@ -296,11 +297,12 @@ pub async fn cmd_delete_document(
             .fetch_one(&mut *tx)
             .await
             .map_err(|e| match e.as_database_error().and_then(|d| d.code()) {
-                Some(code) if code == "42501" => {
-                    "Only the uploader or an administrator can delete this document.".to_string()
-                }
-                Some(code) if code == "P0002" => "Document not found.".to_string(),
-                _ => e.to_string(),
+                Some(code) if code == "42501" => AppError::new(
+                    "document_delete_forbidden",
+                    "Only the uploader or an administrator can delete this document.",
+                ),
+                Some(code) if code == "P0002" => AppError::new("document_not_found", "Document not found."),
+                _ => AppError::of(e),
             })?;
 
     audit::record(
@@ -311,9 +313,9 @@ pub async fn cmd_delete_document(
         serde_json::json!({ "document_id": document_id, "file_hash": file_hash, "blob_removed": !blob_still_used }),
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(AppError::of)?;
 
-    tx.commit().await.map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(AppError::of)?;
 
     if !blob_still_used {
         remove_blob(&app, &file_hash).await;
@@ -351,10 +353,10 @@ pub async fn cmd_get_job_status(
     state:   State<'_, AppState>,
     session: State<'_, Session>,
     job_id:  Uuid,
-) -> Result<Option<JobStatus>, String> {
+) -> Result<Option<JobStatus>, AppError> {
     let user_id = session.require()?.id;
-    let mut tx = state.app_pool.begin().await.map_err(|e| e.to_string())?;
-    set_current_user(&mut tx, user_id).await.map_err(|e| e.to_string())?;
+    let mut tx = state.app_pool.begin().await.map_err(AppError::of)?;
+    set_current_user(&mut tx, user_id).await.map_err(AppError::of)?;
 
     let job = sqlx::query_as::<_, JobStatus>(
         r#"
@@ -366,8 +368,8 @@ pub async fn cmd_get_job_status(
     .bind(job_id)
     .fetch_optional(&mut *tx)
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(AppError::of)?;
 
-    tx.commit().await.map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(AppError::of)?;
     Ok(job)
 }

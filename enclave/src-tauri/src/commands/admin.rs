@@ -1,3 +1,4 @@
+use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::FromRow;
@@ -74,17 +75,17 @@ fn slugify(name: &str) -> String {
 /// command must call it before doing anything else. The flag is read from
 /// the database on every call, not from the session, so a demotion applies
 /// immediately.
-pub(crate) async fn require_admin(state: &State<'_, AppState>, session: &State<'_, Session>) -> Result<Uuid, String> {
+pub(crate) async fn require_admin(state: &State<'_, AppState>, session: &State<'_, Session>) -> Result<Uuid, AppError> {
     let user_id = session.require()?.id;
     let is_admin: Option<bool> = sqlx::query_scalar("SELECT is_admin FROM users WHERE id = $1")
         .bind(user_id)
         .fetch_optional(&state.admin_pool)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(AppError::of)?;
 
     match is_admin {
         Some(true) => Ok(user_id),
-        _ => Err("Admin privileges required.".to_string()),
+        _ => Err(AppError::new("admin_required", "Admin privileges required.")),
     }
 }
 
@@ -106,7 +107,7 @@ pub struct AdminDepartmentInfo {
 pub async fn cmd_list_departments(
     state:   State<'_, AppState>,
     session: State<'_, Session>,
-) -> Result<Vec<AdminDepartmentInfo>, String> {
+) -> Result<Vec<AdminDepartmentInfo>, AppError> {
     require_admin(&state, &session).await?;
     sqlx::query_as::<_, AdminDepartmentInfo>(
         r#"
@@ -120,7 +121,7 @@ pub async fn cmd_list_departments(
     )
     .fetch_all(&state.admin_pool)
     .await
-    .map_err(|e| e.to_string())
+    .map_err(AppError::of)
 }
 
 /// Delete a department together with its documents (ADR-0017).
@@ -138,10 +139,10 @@ pub async fn cmd_delete_department(
     state:         State<'_, AppState>,
     session:       State<'_, Session>,
     department_id: Uuid,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let user_id = session.require()?.id;
-    let mut tx = state.app_pool.begin().await.map_err(|e| e.to_string())?;
-    set_current_user(&mut tx, user_id).await.map_err(|e| e.to_string())?;
+    let mut tx = state.app_pool.begin().await.map_err(AppError::of)?;
+    set_current_user(&mut tx, user_id).await.map_err(AppError::of)?;
 
     let (document_ids, orphaned_blobs): (Vec<Uuid>, Vec<String>) =
         sqlx::query_as("SELECT document_ids, orphaned_blobs FROM delete_department($1)")
@@ -149,10 +150,12 @@ pub async fn cmd_delete_department(
             .fetch_one(&mut *tx)
             .await
             .map_err(|e| match e.as_database_error().and_then(|d| d.code()) {
-                Some(code) if code == "42501" => "Admin privileges required.".to_string(),
-                Some(code) if code == "23001" => "The default department cannot be deleted.".to_string(),
-                Some(code) if code == "P0002" => "Department not found.".to_string(),
-                _ => e.to_string(),
+                Some(code) if code == "42501" => AppError::new("admin_required", "Admin privileges required."),
+                Some(code) if code == "23001" => {
+                    AppError::new("default_department_protected", "The default department cannot be deleted.")
+                }
+                Some(code) if code == "P0002" => AppError::new("department_not_found", "Department not found."),
+                _ => AppError::of(e),
             })?;
 
     audit::record(
@@ -163,9 +166,9 @@ pub async fn cmd_delete_department(
         serde_json::json!({ "document_ids": document_ids, "blobs_removed": orphaned_blobs.len() }),
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(AppError::of)?;
 
-    tx.commit().await.map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(AppError::of)?;
 
     for hash in &orphaned_blobs {
         remove_blob(&app, hash).await;
@@ -181,23 +184,23 @@ pub async fn cmd_delete_department(
 pub async fn cmd_list_my_departments(
     state:   State<'_, AppState>,
     session: State<'_, Session>,
-) -> Result<Vec<DepartmentInfo>, String> {
+) -> Result<Vec<DepartmentInfo>, AppError> {
     let user_id = session.require()?.id;
 
     // Must be one explicit transaction: set_config(..., true) is
     // transaction-local, so setting it on a bare acquired connection with no
     // BEGIN reverts before the SELECT below ever runs (CLAUDE.md invariant #2).
-    let mut tx = state.app_pool.begin().await.map_err(|e| e.to_string())?;
-    set_current_user(&mut tx, user_id).await.map_err(|e| e.to_string())?;
+    let mut tx = state.app_pool.begin().await.map_err(AppError::of)?;
+    set_current_user(&mut tx, user_id).await.map_err(AppError::of)?;
 
     let depts = sqlx::query_as::<_, DepartmentInfo>(
         "SELECT id, name, is_default FROM departments WHERE deleted_at IS NULL ORDER BY is_default DESC, name",
     )
         .fetch_all(&mut *tx)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(AppError::of)?;
 
-    tx.commit().await.map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(AppError::of)?;
     Ok(depts)
 }
 
@@ -212,10 +215,10 @@ pub async fn cmd_create_department(
     state:   State<'_, AppState>,
     session: State<'_, Session>,
     args:    CreateDeptArgs,
-) -> Result<DepartmentInfo, String> {
+) -> Result<DepartmentInfo, AppError> {
     let admin_id = require_admin(&state, &session).await?;
 
-    let mut tx = state.admin_pool.begin().await.map_err(|e| e.to_string())?;
+    let mut tx = state.admin_pool.begin().await.map_err(AppError::of)?;
     let dept = sqlx::query_as::<_, DepartmentInfo>(
         "INSERT INTO departments (name, slug) VALUES ($1, $2) RETURNING id, name, is_default",
     )
@@ -223,13 +226,13 @@ pub async fn cmd_create_department(
     .bind(slugify(&args.name))
     .fetch_one(&mut *tx)
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(AppError::of)?;
 
     audit::record(&mut tx, Some(admin_id), Some(dept.id), event::DEPARTMENT_CREATED, serde_json::json!({ "name": dept.name }))
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(AppError::of)?;
 
-    tx.commit().await.map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(AppError::of)?;
     Ok(dept)
 }
 
@@ -248,7 +251,7 @@ pub struct MembershipInfo {
 pub async fn cmd_list_memberships(
     state:   State<'_, AppState>,
     session: State<'_, Session>,
-) -> Result<Vec<MembershipInfo>, String> {
+) -> Result<Vec<MembershipInfo>, AppError> {
     require_admin(&state, &session).await?;
     sqlx::query_as::<_, MembershipInfo>(
         r#"
@@ -261,7 +264,7 @@ pub async fn cmd_list_memberships(
     )
     .fetch_all(&state.admin_pool)
     .await
-    .map_err(|e| e.to_string())
+    .map_err(AppError::of)
 }
 
 /// Add or remove one user's membership in one department. Admin-only.
@@ -280,10 +283,10 @@ pub async fn cmd_add_member(
     state:   State<'_, AppState>,
     session: State<'_, Session>,
     args:    MembershipArgs,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let admin_id = require_admin(&state, &session).await?;
 
-    let mut tx = state.admin_pool.begin().await.map_err(|e| e.to_string())?;
+    let mut tx = state.admin_pool.begin().await.map_err(AppError::of)?;
     let added = sqlx::query(
         r#"
         INSERT INTO department_members (user_id, department_id)
@@ -295,17 +298,17 @@ pub async fn cmd_add_member(
     .bind(args.department_id)
     .execute(&mut *tx)
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(AppError::of)?
     .rows_affected();
 
     // Only a real change is an event; re-adding an existing member is a no-op.
     if added > 0 {
         audit::record(&mut tx, Some(admin_id), Some(args.department_id), event::MEMBER_ADDED, serde_json::json!({ "user_id": args.user_id }))
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(AppError::of)?;
     }
 
-    tx.commit().await.map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(AppError::of)?;
     Ok(())
 }
 
@@ -314,25 +317,25 @@ pub async fn cmd_remove_member(
     state:   State<'_, AppState>,
     session: State<'_, Session>,
     args:    MembershipArgs,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let admin_id = require_admin(&state, &session).await?;
 
-    let mut tx = state.admin_pool.begin().await.map_err(|e| e.to_string())?;
+    let mut tx = state.admin_pool.begin().await.map_err(AppError::of)?;
     let removed = sqlx::query("DELETE FROM department_members WHERE user_id = $1 AND department_id = $2")
         .bind(args.user_id)
         .bind(args.department_id)
         .execute(&mut *tx)
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(AppError::of)?
         .rows_affected();
 
     if removed > 0 {
         audit::record(&mut tx, Some(admin_id), Some(args.department_id), event::MEMBER_REMOVED, serde_json::json!({ "user_id": args.user_id }))
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(AppError::of)?;
     }
 
-    tx.commit().await.map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(AppError::of)?;
     Ok(())
 }
 
@@ -342,7 +345,7 @@ pub async fn cmd_remove_member(
 pub async fn cmd_list_adapters(
     state:   State<'_, AppState>,
     session: State<'_, Session>,
-) -> Result<Vec<AdapterInfo>, String> {
+) -> Result<Vec<AdapterInfo>, AppError> {
     require_admin(&state, &session).await?;
     sqlx::query_as::<_, AdapterInfo>(
         r#"
@@ -354,7 +357,7 @@ pub async fn cmd_list_adapters(
     )
     .fetch_all(&state.admin_pool)
     .await
-    .map_err(|e| e.to_string())
+    .map_err(AppError::of)
 }
 
 /// Register (or reuse) a LoRA adapter file and assign it to a department.
@@ -389,7 +392,7 @@ pub async fn cmd_add_adapter(
     state:   State<'_, AppState>,
     session: State<'_, Session>,
     args:    AddAdapterArgs,
-) -> Result<AdapterInfo, String> {
+) -> Result<AdapterInfo, AppError> {
     let admin_id = require_admin(&state, &session).await?;
 
     // Content-addressed like documents: hash the actual file if it's
@@ -402,7 +405,7 @@ pub async fn cmd_add_adapter(
     };
     let name = adapter_name_from_path(&args.adapter_path, &file_hash);
 
-    let mut tx = state.admin_pool.begin().await.map_err(|e| e.to_string())?;
+    let mut tx = state.admin_pool.begin().await.map_err(AppError::of)?;
 
     let adapter_id: Uuid = sqlx::query_scalar(
         r#"
@@ -417,7 +420,7 @@ pub async fn cmd_add_adapter(
     .bind(&file_hash)
     .fetch_one(&mut *tx)
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(AppError::of)?;
 
     let da_id: Uuid = sqlx::query_scalar(
         r#"
@@ -432,7 +435,7 @@ pub async fn cmd_add_adapter(
     .bind(args.scale)
     .fetch_one(&mut *tx)
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(AppError::of)?;
 
     let info = sqlx::query_as::<_, AdapterInfo>(
         r#"
@@ -445,7 +448,7 @@ pub async fn cmd_add_adapter(
     .bind(da_id)
     .fetch_one(&mut *tx)
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(AppError::of)?;
 
     audit::record(
         &mut tx,
@@ -455,9 +458,9 @@ pub async fn cmd_add_adapter(
         serde_json::json!({ "adapter_id": adapter_id, "adapter_path": info.adapter_path, "scale": info.scale }),
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(AppError::of)?;
 
-    tx.commit().await.map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(AppError::of)?;
     Ok(info)
 }
 
@@ -481,7 +484,7 @@ pub async fn cmd_list_audit(
     state:   State<'_, AppState>,
     session: State<'_, Session>,
     limit:   Option<i64>,
-) -> Result<Vec<AuditEntry>, String> {
+) -> Result<Vec<AuditEntry>, AppError> {
     let user_id = session.require()?.id;
     let limit = limit.unwrap_or(200).clamp(1, 1000);
 
@@ -501,16 +504,16 @@ pub async fn cmd_list_audit(
             .bind(limit)
             .fetch_all(&state.admin_pool)
             .await
-            .map_err(|e| e.to_string());
+            .map_err(AppError::of);
     }
 
-    let mut tx = state.app_pool.begin().await.map_err(|e| e.to_string())?;
-    set_current_user(&mut tx, user_id).await.map_err(|e| e.to_string())?;
+    let mut tx = state.app_pool.begin().await.map_err(AppError::of)?;
+    set_current_user(&mut tx, user_id).await.map_err(AppError::of)?;
     let rows = sqlx::query_as::<_, AuditEntry>(sql)
         .bind(limit)
         .fetch_all(&mut *tx)
         .await
-        .map_err(|e| e.to_string())?;
-    tx.commit().await.map_err(|e| e.to_string())?;
+        .map_err(AppError::of)?;
+    tx.commit().await.map_err(AppError::of)?;
     Ok(rows)
 }

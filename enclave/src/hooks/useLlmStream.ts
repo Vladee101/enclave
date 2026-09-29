@@ -53,7 +53,9 @@ export function useLlmStream() {
   const [calculation, setCalculation] = useState<string | null>(null);
   const [clarification, setClarification] = useState<Clarification | null>(null);
   const [streaming, setStreaming] = useState(false);
-  const [error,     setError]     = useState<string | null>(null);
+  // The raw rejection — `{code, params, message}` from the core; the UI
+  // words it with `tError`.
+  const [error,     setError]     = useState<unknown>(null);
   const unlisten = useRef<UnlistenFn | null>(null);
 
   const cancel = useCallback(() => {
@@ -94,7 +96,7 @@ export function useLlmStream() {
       setPartial(result.answer);
       return result;
     } catch (e) {
-      setError(String(e));
+      setError(e);
       throw e;
     } finally {
       unlisten.current?.();

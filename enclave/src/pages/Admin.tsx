@@ -23,7 +23,7 @@ interface AuditEntry {
 
 export function AdminPage() {
   const { user } = useAuth();
-  const { t, tPlural, formatDateTime } = useI18n();
+  const { t, tError, tPlural, formatDateTime } = useI18n();
   const [depts,     setDepts]     = useState<Dept[]>([]);
   const [adapters,  setAdapters]  = useState<Adapter[]>([]);
   const [newDept,   setNewDept]   = useState('');
@@ -75,7 +75,7 @@ export function AdminPage() {
     try {
       await invoke('cmd_delete_department', { departmentId: d.id });
     } catch (e) {
-      setError(String(e));
+      setError(tError(e));
     }
     await load();
   }
@@ -86,7 +86,7 @@ export function AdminPage() {
     setSaving(true);
     await invoke('cmd_create_department', {
       args: { name: newDept },
-    }).catch(console.error);
+    }).catch(e => setError(tError(e)));
     setNewDept('');
     await load();
     setSaving(false);
@@ -98,7 +98,7 @@ export function AdminPage() {
     setSaving(true);
     await invoke('cmd_add_member', {
       args: memberForm,
-    }).catch(console.error);
+    }).catch(e => setError(tError(e)));
     await load();
     setSaving(false);
   }
@@ -107,7 +107,7 @@ export function AdminPage() {
     if (!user) return;
     await invoke('cmd_remove_member', {
       args: { user_id: m.user_id, department_id: m.department_id },
-    }).catch(console.error);
+    }).catch(e => setError(tError(e)));
     await load();
   }
 
@@ -121,7 +121,7 @@ export function AdminPage() {
         adapter_path:  adapterForm.adapter_path,
         scale:         parseFloat(adapterForm.scale),
       },
-    }).catch(console.error);
+    }).catch(e => setError(tError(e)));
     setAdapterForm(prev => ({ ...prev, adapter_path: '' }));
     await load();
     setSaving(false);

@@ -5,7 +5,8 @@ import { useI18n, LangToggle } from '../i18n';
 
 interface ModelStatus {
   key:     string;
-  label:   string;
+  /** The model's or build's own name — never translated. */
+  name:    string;
   state:   'ready' | 'missing' | 'unverified';
   size:    number;
   partial: number;
@@ -23,8 +24,17 @@ interface Done     { ok: boolean; error: string | null; }
  * offline machine. The app restarts to load them.
  */
 export function ModelSetup() {
-  const { t, formatSize } = useI18n();
+  const { t, tError, formatSize } = useI18n();
   const gb = (bytes: number) => formatSize(bytes, 'GB');
+  const itemLabel = (m: ModelStatus) => {
+    switch (m.key) {
+      case 'chat':                return t('modelSetup.itemChat', { name: m.name });
+      case 'embed':               return t('modelSetup.itemEmbed', { name: m.name });
+      case 'engine':              return t('modelSetup.itemEngine', { name: m.name });
+      case 'engine-cuda-runtime': return t('modelSetup.itemCudaRuntime');
+      default:                    return m.name;
+    }
+  };
   const [models,     setModels]     = useState<ModelStatus[] | null>(null);
   const [progress,   setProgress]   = useState<Record<string, number>>({});
   const [running,    setRunning]    = useState(false);
@@ -37,7 +47,7 @@ export function ModelSetup() {
     try {
       setModels(await invoke<ModelStatus[]>('cmd_models_status'));
     } catch (e) {
-      setError(String(e));
+      setError(tError(e));
     }
   }, []);
 
@@ -73,7 +83,7 @@ export function ModelSetup() {
       await invoke('cmd_download_models');
     } catch (e) {
       setRunning(false);
-      setError(String(e));
+      setError(tError(e));
     }
   };
 
@@ -84,7 +94,7 @@ export function ModelSetup() {
       setInstalled(true);
       await refresh();
     } catch (e) {
-      setError(String(e));
+      setError(tError(e));
     }
   };
 
@@ -111,7 +121,7 @@ export function ModelSetup() {
               <button
                 type="button"
                 className="btn btn-primary"
-                onClick={() => invoke('cmd_restart_app').catch(e => setError(String(e)))}
+                onClick={() => invoke('cmd_restart_app').catch(e => setError(tError(e)))}
               >
                 {t('common.restartNow')}
               </button>
@@ -125,7 +135,7 @@ export function ModelSetup() {
                 return (
                   <div key={m.key} className="model-setup-item">
                     <div className="model-setup-row">
-                      <span>{m.label}</span>
+                      <span>{itemLabel(m)}</span>
                       <span className="model-setup-size">
                         {done > 0 ? `${gb(done)} / ` : ''}{gb(m.size)}
                       </span>

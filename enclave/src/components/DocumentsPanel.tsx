@@ -58,7 +58,7 @@ interface Props {
  * needs no clarification (ADR-0023). Names and types only — no cell values.
  */
 export function DocumentsPanel({ onInsert, selected, onToggleSelect, onLoaded }: Props) {
-  const { t, tPlural, formatNumber } = useI18n();
+  const { t, tError, tPlural, formatNumber } = useI18n();
   const [docs,     setDocs]     = useState<DocInfo[]>([]);
   const [tables,   setTables]   = useState<TableOutline[]>([]);
   const [filter,   setFilter]   = useState('');
@@ -78,7 +78,7 @@ export function DocumentsPanel({ onInsert, selected, onToggleSelect, onLoaded }:
       setTables(t);
       onLoaded?.(d);
     } catch (e) {
-      setError(String(e));
+      setError(tError(e));
     } finally {
       setLoading(false);
     }

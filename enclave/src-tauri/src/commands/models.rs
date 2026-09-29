@@ -4,6 +4,7 @@
 //! weights are the machine's, not a department's. Nothing here reads the
 //! database.
 
+use crate::error::AppError;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Manager, State};
@@ -15,14 +16,14 @@ use crate::llm::{models, LlmClient};
 pub struct ModelDownloads(AtomicBool);
 
 #[tauri::command]
-pub fn cmd_models_status(app: AppHandle) -> Result<Vec<models::ModelStatus>, String> {
-    models::status(&app).map_err(|e| e.to_string())
+pub fn cmd_models_status(app: AppHandle) -> Result<Vec<models::ModelStatus>, AppError> {
+    models::status(&app).map_err(AppError::of)
 }
 
 /// Start downloading the missing models in the background; progress comes
 /// as `models-progress` events, the end as `models-done`.
 #[tauri::command]
-pub fn cmd_download_models(app: AppHandle, downloads: State<'_, ModelDownloads>) -> Result<(), String> {
+pub fn cmd_download_models(app: AppHandle, downloads: State<'_, ModelDownloads>) -> Result<(), AppError> {
     if downloads.0.swap(true, Ordering::SeqCst) {
         return Ok(()); // already running
     }
@@ -35,11 +36,11 @@ pub fn cmd_download_models(app: AppHandle, downloads: State<'_, ModelDownloads>)
 
 /// Use a model file the user already has.
 #[tauri::command]
-pub async fn cmd_import_model(app: AppHandle, key: String, path: String) -> Result<(), String> {
+pub async fn cmd_import_model(app: AppHandle, key: String, path: String) -> Result<(), AppError> {
     tauri::async_runtime::spawn_blocking(move || models::import(&app, &key, &PathBuf::from(path.trim().trim_matches('"'))))
         .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| format!("{e:#}"))
+        .map_err(AppError::of)?
+        .map_err(|e| AppError::from_anyhow(&e))
 }
 
 /// Restart to load newly installed models. `AppHandle::restart` does not
@@ -50,11 +51,13 @@ pub async fn cmd_import_model(app: AppHandle, key: String, path: String) -> Resu
 /// `pnpm tauri dev` runs, and a restarted process outlives it — a white
 /// window (observed). The frontend shows this message instead.
 #[tauri::command]
-pub fn cmd_restart_app(app: AppHandle) -> Result<(), String> {
+pub fn cmd_restart_app(app: AppHandle) -> Result<(), AppError> {
     if cfg!(debug_assertions) {
-        return Err("Development build: close Enclave and start it again with `pnpm tauri dev` \
-                    (a restarted process would lose the Vite dev server)."
-            .into());
+        return Err(AppError::new(
+            "restart_dev_build",
+            "Development build: close Enclave and start it again with `pnpm tauri dev` \
+             (a restarted process would lose the Vite dev server).",
+        ));
     }
     if let Some(llm) = app.try_state::<Option<LlmClient>>() {
         if let Some(llm) = llm.inner() {

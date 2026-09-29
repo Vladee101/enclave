@@ -6,6 +6,7 @@ pub mod commands;
 pub mod audit;
 pub mod backup;
 pub mod session;
+pub mod error;
 pub mod tables;
 
 use sqlx::PgPool;

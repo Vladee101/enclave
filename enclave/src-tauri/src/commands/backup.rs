@@ -2,6 +2,7 @@
 //! `crate::backup`; these wrappers check the caller, pick the paths and
 //! report progress as `backup-progress` events.
 
+use crate::error::AppError;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,9 +25,9 @@ pub struct BackupBusy(AtomicBool);
 struct Running<'a>(&'a AtomicBool);
 
 impl<'a> Running<'a> {
-    fn start(flag: &'a AtomicBool) -> Result<Self, String> {
+    fn start(flag: &'a AtomicBool) -> Result<Self, AppError> {
         if flag.swap(true, Ordering::SeqCst) {
-            return Err("A backup or restore is already running.".into());
+            return Err(AppError::new("backup_busy", "A backup or restore is already running."));
         }
         Ok(Self(flag))
     }
@@ -86,15 +87,17 @@ fn progress(app: &AppHandle) -> backup::OnProgress {
     })
 }
 
-fn app_data(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path().app_data_dir().map_err(|e| e.to_string())
+fn app_data(app: &AppHandle) -> Result<PathBuf, AppError> {
+    app.path().app_data_dir().map_err(AppError::of)
 }
 
-fn embedded_pg<'a>(pg: &'a State<'_, Option<EmbeddedPostgres>>) -> Result<&'a EmbeddedPostgres, String> {
+fn embedded_pg<'a>(pg: &'a State<'_, Option<EmbeddedPostgres>>) -> Result<&'a EmbeddedPostgres, AppError> {
     pg.inner().as_ref().ok_or_else(|| {
-        "Enclave is using a PostgreSQL server (*_DATABASE_URL), not its own database: \
-         restore that server's data with the server's own backup tools."
-            .to_string()
+        AppError::new(
+            "restore_server_mode",
+            "Enclave is using a PostgreSQL server (*_DATABASE_URL), not its own database: \
+             restore that server's data with the server's own backup tools.",
+        )
     })
 }
 
@@ -107,16 +110,16 @@ pub async fn cmd_backup_create(
     urls:    State<'_, DatabaseUrls>,
     busy:    State<'_, BackupBusy>,
     path:    String,
-) -> Result<BackupSummary, String> {
+) -> Result<BackupSummary, AppError> {
     let user_id = require_admin(&state, &session).await?;
     let _running = Running::start(&busy.0)?;
-    let bin = embedded::tools_dir(&app).map_err(|e| format!("{e:#}"))?;
+    let bin = embedded::tools_dir(&app).map_err(|e| AppError::from_anyhow(&e))?;
     let out = PathBuf::from(&path);
     let manifest = backup::create(&state.admin_pool, &bin, &urls.admin, &app_data(&app)?.join("blobs"), &out, progress(&app))
         .await
-        .map_err(|e| format!("{e:#}"))?;
+        .map_err(|e| AppError::from_anyhow(&e))?;
 
-    let mut conn = state.admin_pool.acquire().await.map_err(|e| e.to_string())?;
+    let mut conn = state.admin_pool.acquire().await.map_err(AppError::of)?;
     let file = out.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
     audit::record(
         &mut conn,
@@ -132,7 +135,7 @@ pub async fn cmd_backup_create(
         }),
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(AppError::of)?;
     Ok((&manifest).into())
 }
 
@@ -143,12 +146,12 @@ pub async fn cmd_backup_inspect(
     state:   State<'_, AppState>,
     session: State<'_, Session>,
     path:    String,
-) -> Result<BackupSummary, String> {
+) -> Result<BackupSummary, AppError> {
     require_admin(&state, &session).await?;
     let manifest = tauri::async_runtime::spawn_blocking(move || backup::read_manifest(&PathBuf::from(path)))
         .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| format!("{e:#}"))?;
+        .map_err(AppError::of)?
+        .map_err(|e| AppError::from_anyhow(&e))?;
     Ok((&manifest).into())
 }
 
@@ -161,14 +164,14 @@ pub async fn cmd_backup_restore(
     pg:      State<'_, Option<EmbeddedPostgres>>,
     busy:    State<'_, BackupBusy>,
     path:    String,
-) -> Result<StagedSummary, String> {
+) -> Result<StagedSummary, AppError> {
     require_admin(&state, &session).await?;
     let pg = embedded_pg(&pg)?;
     let _running = Running::start(&busy.0)?;
     let username = session.require()?.username;
     let staged = backup::stage(&pg.cluster(), &app_data(&app)?, &PathBuf::from(path), &username, progress(&app))
         .await
-        .map_err(|e| format!("{e:#}"))?;
+        .map_err(|e| AppError::from_anyhow(&e))?;
     Ok((&staged).into())
 }
 
@@ -178,9 +181,9 @@ pub async fn cmd_backup_staged(
     app:     AppHandle,
     state:   State<'_, AppState>,
     session: State<'_, Session>,
-) -> Result<Option<StagedSummary>, String> {
+) -> Result<Option<StagedSummary>, AppError> {
     require_admin(&state, &session).await?;
-    let staged = backup::staged(&app_data(&app)?).map_err(|e| format!("{e:#}"))?;
+    let staged = backup::staged(&app_data(&app)?).map_err(|e| AppError::from_anyhow(&e))?;
     Ok(staged.as_ref().map(Into::into))
 }
 
@@ -192,9 +195,9 @@ pub async fn cmd_backup_cancel_restore(
     session: State<'_, Session>,
     pg:      State<'_, Option<EmbeddedPostgres>>,
     busy:    State<'_, BackupBusy>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     require_admin(&state, &session).await?;
     let pg = embedded_pg(&pg)?;
     let _running = Running::start(&busy.0)?;
-    backup::discard_staged(&pg.cluster(), &app_data(&app)?).await.map_err(|e| format!("{e:#}"))
+    backup::discard_staged(&pg.cluster(), &app_data(&app)?).await.map_err(|e| AppError::from_anyhow(&e))
 }

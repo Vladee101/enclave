@@ -27,8 +27,9 @@ use tracing::{info, warn};
 pub struct ModelFile {
     /// Stable id, used by the frontend.
     pub key:       &'static str,
-    /// What the user sees.
-    pub label:     &'static str,
+    /// The model's own name. What it is for («answers», «search») is
+    /// the UI's to say, in the user's language.
+    pub name:      &'static str,
     /// The name `llm::model_path` looks for in the models directory.
     pub file_name: &'static str,
     pub url:       &'static str,
@@ -41,7 +42,7 @@ pub struct ModelFile {
 pub const MODELS: [ModelFile; 2] = [
     ModelFile {
         key:       "chat",
-        label:     "Qwen3-4B (answers)",
+        name:      "Qwen3-4B",
         file_name: "base.gguf",
         url:       "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf",
         sha256:    "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
@@ -49,7 +50,7 @@ pub const MODELS: [ModelFile; 2] = [
     },
     ModelFile {
         key:       "embed",
-        label:     "nomic-embed-text v1.5 (search)",
+        name:      "nomic-embed-text v1.5",
         file_name: "embed.gguf",
         url:       "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.f16.gguf",
         sha256:    "f7af6f66802f4df86eda10fe9bbcfc75c39562bed48ef6ace719a251cf1c2fdb",
@@ -71,7 +72,9 @@ struct Installed {
 #[derive(Serialize, Debug)]
 pub struct ModelStatus {
     pub key:        &'static str,
-    pub label:      String,
+    /// A proper name (a model, an engine build), never translated; the UI
+    /// words the item by `key`.
+    pub name:       String,
     /// "ready", "missing", or "unverified" (a file is there, but nothing
     /// recorded it — e.g. copied in by hand before this existed).
     pub state:      &'static str,
@@ -148,7 +151,7 @@ fn model_status(app: &AppHandle) -> Result<Vec<ModelStatus>> {
                 (None, _) => "missing",
             };
             let partial = std::fs::metadata(dir.join(format!("{}.part", m.file_name))).map(|md| md.len()).unwrap_or(0);
-            ModelStatus { key: m.key, label: m.label.to_string(), state, size: m.size, partial }
+            ModelStatus { key: m.key, name: m.name.to_string(), state, size: m.size, partial }
         })
         .collect())
 }
@@ -166,7 +169,7 @@ pub async fn download_missing(app: AppHandle) {
             .build()?;
         for (m, s) in MODELS.iter().zip(states) {
             if s.state != "ready" {
-                download_one(&app, &http, &dir, m).await.with_context(|| m.label)?;
+                download_one(&app, &http, &dir, m).await.with_context(|| m.name)?;
             }
         }
         super::engine::download_missing(&app, &http).await?;
@@ -312,7 +315,7 @@ async fn download_one(app: &AppHandle, http: &reqwest::Client, dir: &Path, m: &M
     let _ = std::fs::remove_file(&target);
     std::fs::rename(&part, &target)?;
     record(dir, m.file_name, Installed { size: m.size, sha256: m.sha256.to_string(), source: "download".into() })?;
-    info!("{} installed as {}", m.label, target.display());
+    info!("{} installed as {}", m.name, target.display());
     Ok(())
 }
 
@@ -326,7 +329,11 @@ pub fn import(app: &AppHandle, key: &str, source: &Path) -> Result<()> {
         .with_context(|| format!("cannot open {}", source.display()))?
         .read_exact(&mut magic)
         .context("the file is too short to be a model")?;
-    anyhow::ensure!(&magic == b"GGUF", "{} is not a GGUF model file", source.display());
+    anyhow::ensure!(
+        &magic == b"GGUF",
+        crate::error::AppError::new("model_not_gguf", format!("{} is not a GGUF model file", source.display()))
+            .with("path", source.display().to_string())
+    );
 
     let dir = models_dir(app)?;
     std::fs::create_dir_all(&dir)?;
@@ -338,7 +345,7 @@ pub fn import(app: &AppHandle, key: &str, source: &Path) -> Result<()> {
     let (hasher, size) = hash_existing(&target)?;
     let digest = format!("{:x}", hasher.finalize());
     if digest != m.sha256 {
-        warn!("{} imported from {}: not the pinned file (sha256 {digest}) — accepted as the user's choice", m.label, source.display());
+        warn!("{} imported from {}: not the pinned file (sha256 {digest}) — accepted as the user's choice", m.name, source.display());
     }
     record(&dir, m.file_name, Installed { size, sha256: digest, source: "import".into() })
 }
