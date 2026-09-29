@@ -97,6 +97,8 @@ interface I18nValue {
   formatDateTime: (iso: string) => string;
   /** Locale-aware number (grouping separators) for the current language. */
   formatNumber: (n: number) => string;
+  /** Bytes as megabytes (1 decimal) or gigabytes (2): «194,5 МБ», "2.50 GB". */
+  formatSize: (bytes: number, unit: 'MB' | 'GB') => string;
 }
 
 const I18nContext = createContext<I18nValue | null>(null);
@@ -150,8 +152,20 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     [lang],
   );
 
+  const formatSize = useCallback(
+    (bytes: number, unit: 'MB' | 'GB') => {
+      const digits = unit === 'MB' ? 1 : 2;
+      const n = (bytes / (unit === 'MB' ? 1e6 : 1e9)).toLocaleString(lang === 'ru' ? 'ru-RU' : 'en-US', {
+        minimumFractionDigits: digits,
+        maximumFractionDigits: digits,
+      });
+      return interpolate(lookup(lang, unit === 'MB' ? 'common.unitMB' : 'common.unitGB') as string, { n });
+    },
+    [lang],
+  );
+
   return (
-    <I18nContext.Provider value={{ lang, setLang, t, tPlural, formatDateTime, formatNumber }}>
+    <I18nContext.Provider value={{ lang, setLang, t, tPlural, formatDateTime, formatNumber, formatSize }}>
       {children}
     </I18nContext.Provider>
   );

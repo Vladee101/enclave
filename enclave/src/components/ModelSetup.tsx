@@ -14,7 +14,6 @@ interface ModelStatus {
 interface Progress { key: string; downloaded: number; total: number; }
 interface Done     { ok: boolean; error: string | null; }
 
-const gb = (bytes: number) => (bytes / 1e9).toFixed(2) + ' GB';
 
 /**
  * First-run setup (ADR-0024, ADR-0025): shown until both models and the
@@ -24,7 +23,8 @@ const gb = (bytes: number) => (bytes / 1e9).toFixed(2) + ' GB';
  * offline machine. The app restarts to load them.
  */
 export function ModelSetup() {
-  const { t } = useI18n();
+  const { t, formatSize } = useI18n();
+  const gb = (bytes: number) => formatSize(bytes, 'GB');
   const [models,     setModels]     = useState<ModelStatus[] | null>(null);
   const [progress,   setProgress]   = useState<Record<string, number>>({});
   const [running,    setRunning]    = useState(false);

@@ -20,7 +20,6 @@ interface Staged   { backup: BackupSummary; staged_at: string; staged_by: string
 interface Progress { stage: 'database' | 'files' | 'checking'; done: number; total: number; }
 
 const EXTENSION = 'enclave-backup';
-const mb = (bytes: number) => (bytes / 1e6).toFixed(1) + ' MB';
 
 function stageText(t: TFunc, p: Progress | null): string {
   if (!p) return t('backup.stageStart');
@@ -37,7 +36,8 @@ function stageText(t: TFunc, p: Progress | null): string {
  * replaces the data on the next start.
  */
 export function BackupCard() {
-  const { t, tPlural, formatDateTime } = useI18n();
+  const { t, tPlural, formatDateTime, formatSize } = useI18n();
+  const mb = (bytes: number) => formatSize(bytes, 'MB');
   const [busy,     setBusy]     = useState<'backup' | 'restore' | null>(null);
   const [progress, setProgress] = useState<Progress | null>(null);
   const [made,     setMade]     = useState<BackupSummary | null>(null);

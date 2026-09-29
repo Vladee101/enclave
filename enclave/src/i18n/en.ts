@@ -12,6 +12,9 @@
 export const en = {
   common: {
     add: '+ Add',
+    // Sizes: the number is formatted for the language, the unit comes from here.
+    unitMB: '{n} MB',
+    unitGB: '{n} GB',
     delete: 'Delete',
     restartNow: 'Restart now',
   },
@@ -55,7 +58,7 @@ export const en = {
     emptyTitle: 'Ask anything',
     emptySubtitle: 'Your queries and documents never leave this machine.',
     thinking: 'Thinking…',
-    inScope: 'in {files}',
+    inScope: 'Only in: {files}',
     howCalculated: 'How this was calculated',
     askOnlyIn: 'Ask only in:',
     clear: 'clear',
@@ -124,9 +127,6 @@ export const en = {
     nDocuments: ['{count} document', '{count} documents'],
     nMemberships: ['{count} membership', '{count} memberships'],
   },
-
-    inScope: 'in {files}',
-    howCalculated: 'How this was calculated',
 
   backup: {
     title: 'Backup',
