@@ -69,5 +69,9 @@ pub fn cmd_restart_app(app: AppHandle) -> Result<(), AppError> {
             pg.stop();
         }
     }
+    // The restarted process must not find this one's single-instance lock:
+    // it would hand over to us and exit, and we are exiting too. Released
+    // here because restart() leaves without the exit event that releases it.
+    tauri_plugin_single_instance::destroy(&app);
     app.restart()
 }

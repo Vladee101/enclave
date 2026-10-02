@@ -138,10 +138,47 @@ fn detect() -> Flavor {
             return Flavor::Cuda;
         }
     }
-    if system32.join("vulkan-1.dll").is_file() {
+    // The loader alone is not enough: a clean Windows 11 VM has
+    // vulkan-1.dll and no device behind it (docs/clean-machine-check.md).
+    // A Vulkan driver registers itself — in its display adapter's key on
+    // current Intel / AMD / NVIDIA drivers, in Khronos\Vulkan\Drivers on old
+    // ones.
+    if system32.join("vulkan-1.dll").is_file() && vulkan_driver_registered(&system32) {
         return Flavor::Vulkan;
     }
     Flavor::Cpu
+}
+
+/// Display adapters' device class: each adapter's key names its Vulkan
+/// driver (`VulkanDriverName`) when it has one.
+const DISPLAY_CLASS: &str = r"HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}";
+const KHRONOS_DRIVERS: &str = r"HKLM\SOFTWARE\Khronos\Vulkan\Drivers";
+
+/// Ask reg.exe (part of every Windows) rather than bind the registry API
+/// for one read; its value lines are not translated, only its messages.
+fn vulkan_driver_registered(system32: &Path) -> bool {
+    let query = |args: &[&str]| {
+        let mut cmd = std::process::Command::new(system32.join("reg.exe"));
+        cmd.args(args);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        cmd.output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
+    };
+    lists_vulkan_driver(&query(&["query", DISPLAY_CLASS, "/s", "/v", "VulkanDriverName"]))
+        || lists_vulkan_driver(&query(&["query", KHRONOS_DRIVERS]))
+}
+
+/// A value line of `reg query` output — "    <name>    REG_<type>    <data>" —
+/// that names a driver manifest: `VulkanDriverName` under an adapter, or
+/// the manifest path itself as the value name under Khronos.
+fn lists_vulkan_driver(reg_output: &str) -> bool {
+    reg_output.lines().any(|line| {
+        let line = line.trim();
+        line.contains("    REG_") && (line.starts_with("VulkanDriverName") || line.to_ascii_lowercase().contains(".json"))
+    })
 }
 
 /// The build for this machine, decided once per run.
@@ -163,7 +200,44 @@ fn engine_dir(app: &AppHandle) -> Result<PathBuf> {
 pub fn installed_dir(app: &AppHandle) -> Option<PathBuf> {
     let dir = engine_dir(app).ok()?;
     let all = status(app).ok()?;
-    all.iter().all(|s| s.state == "ready").then_some(dir)
+    if !all.iter().all(|s| s.state == "ready") {
+        return None;
+    }
+    // Every start, not only after unpacking: engines downloaded by a build
+    // that did not do this get the runtime too.
+    match crate::db::embedded::tools_dir(app) {
+        Ok(from) => {
+            if let Err(e) = copy_vc_runtime(&from, &dir) {
+                tracing::warn!("Visual C++ runtime not copied next to the engine: {e:#}");
+            }
+        }
+        Err(e) => tracing::warn!("Visual C++ runtime not copied next to the engine: {e:#}"),
+    }
+    Some(dir)
+}
+
+/// The Visual C++ runtime llama.cpp's Windows builds link against. Their
+/// release archives do not carry it, so on a machine without the
+/// redistributable llama-server.exe does not start — "VCRUNTIME140.dll was
+/// not found", seen on a clean Windows 11 VM (docs/clean-machine-check.md);
+/// a development machine always has it installed. The installer already
+/// carries these files next to PostgreSQL (scripts/fetch-postgres.ps1), and
+/// they are copied next to the engine: app-local, as Microsoft allows for
+/// the redistributable DLLs. PSAPI.DLL, also imported, is part of Windows.
+const VC_RUNTIME: [&str; 3] = ["vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll"];
+
+/// Copy the runtime files `dir` lacks from `from`. A file already there is
+/// left alone.
+fn copy_vc_runtime(from: &Path, dir: &Path) -> Result<()> {
+    for name in VC_RUNTIME {
+        let to = dir.join(name);
+        if to.is_file() {
+            continue;
+        }
+        std::fs::copy(from.join(name), &to)
+            .with_context(|| format!("could not copy {name} from {} to {}", from.display(), dir.display()))?;
+    }
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize)]
@@ -251,6 +325,51 @@ pub async fn download_missing(app: &AppHandle, http: &reqwest::Client) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_vulkan_driver_is_one_registered_not_a_loader_on_disk() {
+        // This machine: Intel and NVIDIA register theirs per adapter.
+        let adapters = concat!(
+            "\r\nHKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}\\0001\r\n",
+            "    VulkanDriverName    REG_MULTI_SZ    C:\\WINDOWS\\System32\\DriverStore\\FileRepository\\nvaci.inf_amd64_0be28d2a022d2f00\\nv-vk64.json\r\n",
+            "\r\nEnd of search: 1 match(es) found.\r\n",
+        );
+        assert!(lists_vulkan_driver(adapters));
+        // An old driver: the manifest path is the value name.
+        let khronos = concat!(
+            "\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\Khronos\\Vulkan\\Drivers\r\n",
+            "    C:\\Windows\\System32\\amd-vulkan64.json    REG_DWORD    0x0\r\n",
+        );
+        assert!(lists_vulkan_driver(khronos));
+        // The VM: nothing found, in any language; reg.exe missing altogether.
+        assert!(!lists_vulkan_driver("\r\nEnd of search: 0 match(es) found.\r\n"));
+        assert!(!lists_vulkan_driver("\r\nПоиск завершен: найдено совпадений: 0.\r\n"));
+        assert!(!lists_vulkan_driver(""));
+    }
+
+    #[test]
+    fn the_vc_runtime_is_copied_next_to_the_engine_once() {
+        let root = std::env::temp_dir().join(format!("enclave-vcrt-{}", std::process::id()));
+        let (from, dir) = (root.join("pg-bin"), root.join("engine"));
+        std::fs::create_dir_all(&from).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in VC_RUNTIME {
+            std::fs::write(from.join(name), name).unwrap();
+        }
+        // One already there (an archive that does carry it) stays as it is.
+        std::fs::write(dir.join("msvcp140.dll"), "the engine's own").unwrap();
+
+        copy_vc_runtime(&from, &dir).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("vcruntime140.dll")).unwrap(), "vcruntime140.dll");
+        assert_eq!(std::fs::read_to_string(dir.join("vcruntime140_1.dll")).unwrap(), "vcruntime140_1.dll");
+        assert_eq!(std::fs::read_to_string(dir.join("msvcp140.dll")).unwrap(), "the engine's own");
+
+        // Missing at the source: an error, not a silent half-copy.
+        std::fs::remove_file(dir.join("vcruntime140.dll")).unwrap();
+        std::fs::remove_file(from.join("vcruntime140.dll")).unwrap();
+        assert!(copy_vc_runtime(&from, &dir).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn cuda_version_is_read_from_the_nvidia_smi_banner() {

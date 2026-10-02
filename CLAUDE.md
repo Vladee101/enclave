@@ -6,7 +6,7 @@
 ## What this file is
 
 A build brief for the coding agent. **The source of truth for *why* is
-`docs/adr/`** — twenty-six accepted Architecture Decision Records (0001–0026; 0011 superseded by 0021). This file says *what
+`docs/adr/`** — twenty-seven accepted Architecture Decision Records (0001–0027; 0011 superseded by 0021). This file says *what
 to build, in what order, and which invariants must never be broken.* When a
 decision here seems arbitrary, the matching ADR explains it. Do not contradict
 an ADR; if reality forces a change, write a new ADR that supersedes the old one
@@ -187,8 +187,11 @@ implementation.
   `*_DATABASE_URL` set the app runs a trimmed PostgreSQL 18 + self-built
   pgvector itself — `postgres.exe` spawned without a console, 127.0.0.1 on
   a free port, generated role passwords sealed with DPAPI. The NSIS
-  installer (`scripts/build-installer.ps1`) carries it. Still open: a
-  clean-machine check.
+  installer (`scripts/build-installer.ps1`) carries it. Checked on a clean
+  Windows 11 VM (ADR-0027, `docs/clean-machine-check.md`): the engine
+  gets the VC++ runtime copied next to it, Vulkan needs a registered
+  driver, one app instance only. Re-run that checklist before shipping an
+  installer that changes what is bundled or downloaded.
 - **Backups (ADR-0026).** A backup is one archive: `pg_dump` of one
   exported snapshot plus every live document's blob, each entry checked
   by SHA-256. A restore never touches live data while the app runs: it is

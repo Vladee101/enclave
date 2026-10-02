@@ -35,18 +35,25 @@ pub struct DatabaseUrls {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "enclave=debug,sqlx=warn".into()),
-        )
-        .init();
-
     tauri::Builder::default()
+        // First: a second launch hands over to the running Enclave and exits
+        // before its own setup. Two instances on one data directory took
+        // each other's database for a crashed one and stopped it — seen on
+        // the clean-machine check (docs/clean-machine-check.md).
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            // Here, not before the builder: a second instance has exited by
+            // now and cannot touch the running one's log file.
+            init_logging(app.path().app_data_dir().ok());
             let app_handle = app.handle().clone();
 
             // Pool construction is async; block here so state is managed
@@ -129,6 +136,23 @@ pub fn run() {
                 }
             }
         });
+}
+
+/// Log to the console (development) and to `{app_data}/enclave.log` — a
+/// release build has no console, so without the file nothing the core
+/// reports is ever seen. The previous run's log is kept as
+/// `enclave.prev.log`.
+fn init_logging(app_data: Option<std::path::PathBuf>) {
+    use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "enclave=debug,sqlx=warn".into());
+    let file = app_data.and_then(|dir| {
+        std::fs::create_dir_all(&dir).ok()?;
+        let log = dir.join("enclave.log");
+        let _ = std::fs::rename(&log, dir.join("enclave.prev.log"));
+        std::fs::File::create(&log).ok()
+    });
+    let file_layer = file.map(|f| fmt::layer().with_ansi(false).with_writer(std::sync::Mutex::new(f)));
+    let _ = tracing_subscriber::registry().with(filter).with(fmt::layer()).with(file_layer).try_init();
 }
 
 /// Async init: connect both pools, run migrations, start LLM sidecar.

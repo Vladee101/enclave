@@ -44,21 +44,30 @@ function VBox {
     if ($LASTEXITCODE -ne 0) { Write-Error "VBoxManage $($args -join ' ') failed (exit $LASTEXITCODE)." }
 }
 
-if ((& $VBox list vms) -match "^`"$Name`"") { Write-Error "A VM named $Name already exists. Remove it or pass -Name." }
+if ((& $VBox list vms) -match "^`"$Name`"") {
+    Write-Error "A VM named $Name already exists. Remove it (VBoxManage unregistervm $Name --delete) or pass -Name."
+}
 
-# Which edition: Pro if the ISO has it (a local account without tricks),
-# else the first image.
+# Which edition: plain Pro if the ISO has it (a local account without
+# tricks), else the first image. `detect` lists them as
+#   ImageIndex4="Windows 11 Pro (10.0.26300.9457 / x64 / ru-RU)"
+# - "Windows 11 Pro (" excludes Pro for Education / Workstations in any
+# language, whose names continue after "Pro".
 $detected = & $VBox unattended detect --iso=$Iso --machine-readable
 $names = @{}
 foreach ($line in $detected) {
-    if ($line -match '^ImageName(\d+)="(.+)"') { $names[$Matches[1]] = $Matches[2] }
+    if ($line -match '^ImageIndex(\d+)="(.+)"') { $names[$Matches[1]] = $Matches[2] }
 }
 $index = 1
-foreach ($k in $names.Keys) {
-    if ($names[$k] -match "Pro$|Pro\b" -and $names[$k] -notmatch "Education|Workstation|N$") { $index = [int]$k; break }
+foreach ($k in ($names.Keys | Sort-Object { [int]$_ })) {
+    if ($names[$k] -like "Windows 11 Pro (*") { $index = [int]$k; break }
 }
 $lang = ($detected | Select-String '^OSLanguages="([^"]+)"').Matches | ForEach-Object { $_.Groups[1].Value } | Select-Object -First 1
 if (-not $lang) { $lang = "en-US" }
+# One string, built here: an expression inside an argument (--locale=(…))
+# is passed by PowerShell as two arguments, and VBoxManage then takes the
+# second for another VM name.
+$locale = $lang -replace '-', '_'
 Write-Host "Windows image $index ($($names["$index"])), language $lang"
 
 $password = Read-Host "Password for the VM's local account '$User'" -AsSecureString
@@ -71,7 +80,7 @@ try {
 
     VBox modifyvm $Name --memory $MemoryMB --cpus $Cpus --firmware efi --tpm-type 2.0 `
         --graphicscontroller vboxsvga --vram 128 --nic1 nat --clipboard-mode bidirectional `
-        --draganddrop hosttoguest --audio-driver none --usb-xhci on
+        --drag-and-drop hosttoguest --audio-driver none --usb-xhci on
     VBox modifynvram $Name inituefivarstore
     VBox modifynvram $Name enrollmssignatures
     VBox modifynvram $Name enrollorclpk
@@ -86,8 +95,8 @@ try {
     VBox sharedfolder add $Name --name installer --hostpath $InstallerDir --readonly --automount --auto-mount-point "E:"
 
     Set-Content -Path $pwFile -Value $plain -NoNewline -Encoding ascii
-    VBox unattended install $Name --iso=$Iso --image-index=$index --user=$User --password-file=$pwFile `
-        --full-user-name="Enclave Tester" --locale=($lang -replace '-', '_') --install-additions `
+    VBox unattended install $Name --iso=$Iso --image-index=$index --user=$User --user-password-file=$pwFile `
+        --full-user-name="Enclave Tester" "--locale=$locale" --install-additions `
         --hostname="$Name.local" --start-vm=gui
 } finally {
     Remove-Item $pwFile -ErrorAction SilentlyContinue

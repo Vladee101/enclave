@@ -108,9 +108,11 @@ live in `src-tauri/tauri.bundle.json`, merged only by that script.
 
 ## Open
 
-- **Clean-machine check of the installer** (no VC++ runtime, no NVIDIA —
-  Vulkan/CPU path). Needs a VM or a second PC; Windows 11 Home here has no
-  Hyper-V/Sandbox.
+- **Clean-machine check: done** (ADR-0027, `docs/clean-machine-check.md`,
+  VM via `scripts/make-test-vm.ps1`). Not covered: AMD/Intel with a real
+  Vulkan driver, NVIDIA older than CUDA 12.4. VirtualBox here needs the
+  Windows hypervisor and Memory integrity off (NEM hangs Windows setup) —
+  turn both back on afterwards.
 - **Code signing** (SmartScreen warns about an unknown publisher).
 - **LoRA adapters:** wired end to end, never exercised with a real adapter.
 - **OCR:** scanned PDFs without a text layer are not read.
