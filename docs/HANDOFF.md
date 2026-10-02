@@ -32,7 +32,7 @@ Feature-complete for a single machine and shipped as a Windows installer.
   `ingest/`, `tables/` (plans + aggregates), `llm/` (sidecars, model and
   engine downloads), `db/` (pools, RLS helper, embedded PostgreSQL),
   `backup.rs`, `error.rs`.
-- Schema: `migrations/001-017`, applied at every start. `db/schema.sql` is
+- Schema: `migrations/001-018`, applied at every start. `db/schema.sql` is
   historical reference only — **the schema is what the migrations build.**
 - Frontend: `src/` — pages, `components/`, `i18n/{en,ru}.ts` (typed: a key
   missing in one fails `tsc`).
@@ -115,7 +115,10 @@ live in `src-tauri/tauri.bundle.json`, merged only by that script.
   turn both back on afterwards.
 - **Code signing** (SmartScreen warns about an unknown publisher).
 - **LoRA adapters:** wired end to end, never exercised with a real adapter.
-- **OCR:** scanned PDFs without a text layer are not read.
+- **OCR of scans: done** with Windows' own recognizer (ADR-0028). Open:
+  tables on scans stay text (no calculations), mixed PDFs (some pages
+  scanned) are read by their text layer only; Tesseract if real scans
+  prove too much for Windows OCR.
 - **Backups:** no encryption, no schedule (ADR-0026).
 - **Model download errors** arrive as events with English text; not coded.
 

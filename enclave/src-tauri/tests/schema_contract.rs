@@ -11,7 +11,7 @@
 //! Same environment as rls_validation (TEST_ADMIN_URL, skip unless
 //! ENCLAVE_REQUIRE_DB_TESTS), its own throwaway database.
 
-use enclave_lib::llm::REGISTER_EMBEDDING_MODEL_SQL;
+use enclave_lib::{ingest::RECORD_OCR_LANGUAGE_SQL, llm::REGISTER_EMBEDDING_MODEL_SQL};
 use sqlx::PgPool;
 
 const TEST_DB_NAME: &str = "enclave_schema_contract_test";
@@ -59,5 +59,18 @@ async fn startup_statements_fit_a_migrations_only_schema() -> Result<(), Box<dyn
     let active: Vec<(String, i32)> =
         sqlx::query_as("SELECT name, dimension FROM embedding_models WHERE is_active").fetch_all(&admin).await?;
     assert_eq!(active, [("nomic-embed-text-v1.5".to_string(), 768)]);
+
+    // The worker records the OCR language of a scan (ADR-0028, migration 018).
+    let doc: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO documents (department_id, title, file_hash, mime_type, byte_size)
+         SELECT id, 'scan.pdf', 'hash-scan', 'application/pdf', 1 FROM departments WHERE is_default
+         RETURNING id",
+    )
+    .fetch_one(&admin)
+    .await?;
+    sqlx::query(RECORD_OCR_LANGUAGE_SQL).bind(doc).bind(Some("ru")).execute(&admin).await?;
+    let recorded: Option<String> =
+        sqlx::query_scalar("SELECT ocr_language FROM documents WHERE id = $1").bind(doc).fetch_one(&admin).await?;
+    assert_eq!(recorded.as_deref(), Some("ru"));
     Ok(())
 }

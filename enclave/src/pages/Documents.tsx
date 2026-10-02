@@ -14,6 +14,8 @@ interface DocInfo {
   status:        'pending' | 'ready' | 'failed';
   department_id: string;
   can_delete:    boolean;
+  /** The OCR language when the text was read from a scan (ADR-0028). */
+  ocr_language:  string | null;
 }
 
 interface JobStatus {
@@ -53,6 +55,7 @@ function docIcon(filename: string): string {
   if (['xls','xlsx'].includes(ext))    return '📊';
   if (['ppt','pptx'].includes(ext))    return '📋';
   if (['txt','md'].includes(ext))      return '📃';
+  if (['jpg','jpeg','png','tif','tiff','bmp'].includes(ext)) return '🖼️';
   return '📁';
 }
 
@@ -140,6 +143,7 @@ export function DocumentsPage() {
             status: 'pending',
             department_id: deptId,
             can_delete: true, // the uploader may always delete their own
+            ocr_language: null, // known once ingested; the list reload brings it
           }, ...prev]);
       setPending(prev => ({ ...prev, [job.document_id]: job.job_id }));
       track(job.job_id);
@@ -230,7 +234,7 @@ export function DocumentsPage() {
           type="file"
           style={{ display: 'none' }}
           multiple
-          accept=".pdf,.docx,.xlsx,.xlsm,.xlsb,.xls,.ods,.txt,.md,.markdown"
+          accept=".pdf,.docx,.xlsx,.xlsm,.xlsb,.xls,.ods,.txt,.md,.markdown,.jpg,.jpeg,.png,.tif,.tiff,.bmp"
           onChange={e => { handleFiles(e.target.files); e.target.value = ''; }}
         />
       </div>
@@ -253,6 +257,11 @@ export function DocumentsPage() {
                 <div className="doc-name">{doc.filename}</div>
                 <div className="doc-info">
                   {(() => { const d = depts.find(d => d.id === doc.department_id); return d ? deptLabel(d, t) : t('documents.unknownDept'); })()}
+                  {doc.ocr_language && (
+                    <span className="doc-ocr" title={t('documents.ocrTitle', { lang: doc.ocr_language })}>
+                      {' · '}{t('documents.ocr', { lang: doc.ocr_language })}
+                    </span>
+                  )}
                 </div>
               </div>
               <Badge cls={badge.cls}>

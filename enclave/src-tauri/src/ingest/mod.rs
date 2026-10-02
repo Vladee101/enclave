@@ -4,6 +4,12 @@ use std::path::Path;
 use uuid::Uuid;
 
 pub mod extract;
+pub mod ocr;
+
+/// Records where the document's text came from (ADR-0028): the OCR
+/// recognizer's language, or NULL for text of its own. Kept in the
+/// ingestion transaction with the chunks. Public for tests/schema_contract.rs.
+pub const RECORD_OCR_LANGUAGE_SQL: &str = "UPDATE documents SET ocr_language = $2 WHERE id = $1";
 pub mod jobs;
 
 /// Chunks per embedding request. Measured with the app's embedding server
@@ -185,6 +191,12 @@ pub async fn ingest_document(
     .fetch_optional(&mut *tx)
     .await?;
     anyhow::ensure!(deleted == Some(false), "document deleted during ingestion; nothing written");
+
+    sqlx::query(RECORD_OCR_LANGUAGE_SQL)
+        .bind(document_id)
+        .bind(&extracted.ocr_language)
+        .execute(&mut *tx)
+        .await?;
 
     // Bulk writes, WRITE_BATCH rows per statement. Row-by-row this was
     // 2 statements per chunk: a 50 000-row spreadsheet spent ~11 minutes

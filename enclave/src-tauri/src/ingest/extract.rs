@@ -1,6 +1,8 @@
 //! Text extraction for ingestion (ADR-0019, ADR-0020): plain text / Markdown,
 //! PDF with a text layer, DOCX, and spreadsheets (XLSX, XLSM, XLSB, XLS, ODS).
-//! Pure Rust — no native libraries to ship with the desktop app.
+//! Pure Rust — no native libraries to ship with the desktop app. Scans —
+//! PDFs without a text layer, and images — go to Windows' own recognizer
+//! (`ocr.rs`, ADR-0028).
 //!
 //! The format is decided from the bytes, not from the browser-reported MIME
 //! type (often empty or wrong for `.md`), with the file name as a tiebreaker
@@ -17,10 +19,12 @@ use quick_xml::Reader;
 /// Extensions accepted at upload. Checked by name before anything is stored,
 /// so an unsupported file is refused immediately instead of failing later in
 /// the worker.
-pub const SUPPORTED_EXTENSIONS: &[&str] =
-    &["pdf", "docx", "txt", "md", "markdown", "xlsx", "xlsm", "xlsb", "xls", "ods"];
+pub const SUPPORTED_EXTENSIONS: &[&str] = &[
+    "pdf", "docx", "txt", "md", "markdown", "xlsx", "xlsm", "xlsb", "xls", "ods", "jpg", "jpeg", "png", "tif", "tiff",
+    "bmp",
+];
 
-const SUPPORTED_LIST: &str = "PDF, DOCX, XLSX, XLS, ODS, TXT, MD";
+const SUPPORTED_LIST: &str = "PDF, DOCX, XLSX, XLS, ODS, TXT, MD, JPG, PNG, TIFF, BMP";
 
 /// How the extracted text is laid out, which decides how it is chunked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +43,9 @@ pub struct Extracted {
     /// Spreadsheets only: every sheet as typed rows, for calculations over
     /// the table (ADR-0022). Empty for documents.
     pub sheets: Vec<Sheet>,
+    /// The recognizer language when the text came from OCR (ADR-0028);
+    /// None when the file had text of its own.
+    pub ocr_language: Option<String>,
 }
 
 /// A typed cell value — what the cell holds, not how it is displayed.
@@ -99,8 +106,21 @@ pub fn extract_text(bytes: &[u8], filename: &str) -> Result<String> {
 pub fn extract(bytes: &[u8], filename: &str) -> Result<Extracted> {
     let ext = extension(filename);
     let mut sheets = Vec::new();
+    let mut ocr_language = None;
     let (text, layout) = if bytes.starts_with(b"%PDF-") {
-        (extract_pdf(bytes)?, Layout::Prose)
+        let mut text = extract_pdf(bytes)?;
+        if normalize(&text).trim().is_empty() {
+            // No text layer: a scan. Read the pages.
+            let read = super::ocr::pdf(bytes)
+                .with_context(|| format!("{filename} has no text layer (a scan), and reading it failed"))?;
+            text = read.text;
+            ocr_language = Some(read.language);
+        }
+        (text, Layout::Prose)
+    } else if is_image(bytes) {
+        let read = super::ocr::image(bytes).with_context(|| format!("reading the text of {filename} failed"))?;
+        ocr_language = Some(read.language);
+        (read.text, Layout::Prose)
     } else if bytes.starts_with(b"PK\x03\x04") {
         // Office Open XML and OpenDocument are all ZIP archives; what is
         // inside decides which one this is, not the name.
@@ -132,15 +152,12 @@ pub fn extract(bytes: &[u8], filename: &str) -> Result<Extracted> {
 
     let text = normalize(&text);
     if text.trim().is_empty() {
-        if bytes.starts_with(b"%PDF-") {
-            bail!(
-                "{filename} has no text layer — it looks like a scanned PDF. \
-                 Enclave does not do OCR yet; export the document with text or upload a text version."
-            );
+        if ocr_language.is_some() {
+            bail!("no text was recognized in {filename} — a blank page, a photo, or too poor a scan");
         }
         bail!("{filename} contains no text");
     }
-    Ok(Extracted { text, layout, sheets })
+    Ok(Extracted { text, layout, sheets, ocr_language })
 }
 
 enum ZipKind {
@@ -352,6 +369,15 @@ fn column_letter(mut index: usize) -> String {
     }
     letters.reverse();
     String::from_utf8(letters).unwrap_or_default()
+}
+
+/// JPEG, PNG, TIFF (either byte order), BMP — by their signatures.
+fn is_image(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0xFF, 0xD8, 0xFF])
+        || bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+        || bytes.starts_with(b"II*\0")
+        || bytes.starts_with(b"MM\0*")
+        || bytes.starts_with(b"BM")
 }
 
 fn extension(filename: &str) -> String {
@@ -696,9 +722,12 @@ mod tests {
     }
 
     #[test]
-    fn pdf_without_text_layer_is_refused_as_scanned() {
+    fn a_blank_pdf_goes_to_ocr_and_fails_with_no_text() {
+        // No text layer → OCR (ADR-0028). A blank page yields nothing; where
+        // there is no Windows recognizer, reading fails. An error either
+        // way — never a "ready" document with nothing in it.
         let err = extract_text(&pdf_with_text(""), "scan.pdf").unwrap_err().to_string();
-        assert!(err.contains("scanned PDF"), "{err}");
+        assert!(err.contains("scan"), "{err}");
     }
 
     #[test]
@@ -935,5 +964,49 @@ mod tests {
         assert!(check_supported("old.doc").is_err());
         assert!(check_supported("Report.PDF").is_ok());
         assert!(check_supported("notes").is_err());
+    }
+
+    /// A scan as an office scanner makes it (ADR-0028): page 1 of
+    /// chromium_ru_en.pdf rendered at 150 dpi — tests/fixtures/scan_ru_en.png,
+    /// and the same image as the only content of a PDF with no text layer,
+    /// tests/fixtures/scan_ru_en.pdf.
+    #[cfg(windows)]
+    fn check_scan(bytes: &[u8], name: &str) {
+        if !super::super::ocr::russian_available() {
+            assert!(
+                std::env::var_os("ENCLAVE_REQUIRE_OCR_TEST").is_none(),
+                "ENCLAVE_REQUIRE_OCR_TEST is set but Windows has no Russian text recognizer"
+            );
+            eprintln!("No Russian text recognizer in Windows — skipping the OCR check of {name}.");
+            return;
+        }
+        let e = extract(bytes, name).unwrap();
+        assert_eq!(e.ocr_language.as_deref(), Some("ru"));
+        for expected in ["Регламент отпусков", "Ежегодный отпуск составляет 28 календарных дней", "Vacation requests in English"] {
+            assert!(e.text.contains(expected), "{expected:?} not in {:?}", e.text);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_scanned_pdf_is_read_by_ocr() {
+        check_scan(include_bytes!("../../tests/fixtures/scan_ru_en.pdf"), "scan_ru_en.pdf");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_image_is_read_by_ocr() {
+        check_scan(include_bytes!("../../tests/fixtures/scan_ru_en.png"), "scan_ru_en.png");
+    }
+
+    #[test]
+    fn images_are_accepted_at_upload_and_recognized_by_signature() {
+        for name in ["scan.jpg", "scan.JPEG", "page.png", "fax.tif", "fax.tiff", "old.bmp"] {
+            assert!(check_supported(name).is_ok(), "{name}");
+        }
+        assert!(is_image(&[0xFF, 0xD8, 0xFF, 0xE0]));
+        assert!(is_image(b"\x89PNG\r\n\x1a\n...."));
+        assert!(is_image(b"II*\0...") && is_image(b"MM\0*..."));
+        assert!(!is_image(b"%PDF-1.4"));
     }
 }

@@ -61,6 +61,12 @@ tauri-plugin-single-instance = "2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+# OCR of scans (ADR-0028): Windows' own PDF renderer and text recognizer,
+# through WinRT. The same version Tauri already brings in.
+windows = { version = "0.61", features = [
+    "Foundation", "Foundation_Collections", "Data_Pdf", "Globalization",
+    "Graphics_Imaging", "Media_Ocr", "Storage_Streams", "Win32_System_WinRT",
+] }
 
 [dev-dependencies]
 rust_xlsxwriter = "0.99.1"

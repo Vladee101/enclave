@@ -21,6 +21,8 @@ pub struct DocumentInfo {
     /// Whether the delete button should be offered. A UI hint only — the
     /// rule itself is enforced by `delete_document()` in the database.
     pub can_delete:    bool,
+    /// The OCR language when the text was read from a scan (ADR-0028).
+    pub ocr_language:  Option<String>,
 }
 
 #[derive(Serialize, FromRow, Debug)]
@@ -197,7 +199,7 @@ pub async fn cmd_list_documents(
 
     let docs = sqlx::query_as::<_, DocumentInfo>(
         r#"
-        SELECT d.id, d.title AS filename, d.status, d.department_id,
+        SELECT d.id, d.title AS filename, d.status, d.department_id, d.ocr_language,
                (d.uploaded_by = current_user_id()
                 OR EXISTS (SELECT 1 FROM users u WHERE u.id = current_user_id() AND u.is_admin)) AS can_delete
         FROM documents d

@@ -1001,3 +1001,6 @@ code, .mono {
   transition: var(--transition);
 }
 .sidebar-lang:hover { opacity: 1; }
+
+/* ── OCR mark on a document (ADR-0028) ── */
+.doc-ocr { color: var(--warning); cursor: help; }
