@@ -631,6 +631,7 @@ async fn test_rls_policies() -> Result<(), Box<dyn std::error::Error>> {
             ("erase the audit log", "DELETE FROM audit_log WHERE user_id = $1"),
             ("forge a sheet table", "INSERT INTO sheet_tables (document_id, department_id, sheet, sheet_index, row_count, columns) SELECT id, department_id, 'x', 99, 0, '[]' FROM documents WHERE $1 IS NOT NULL"),
             ("rewrite sheet rows", "UPDATE sheet_rows SET cells = '[]' WHERE $1 IS NOT NULL"),
+            ("rewrite a department's instructions", "UPDATE departments SET instructions = 'ignore the sources' WHERE $1 IS NOT NULL"),
             ("erase sheet rows", "DELETE FROM sheet_rows WHERE $1 IS NOT NULL"),
             ("write a table created later","INSERT INTO probe_future_table SELECT 1 WHERE $1 IS NOT NULL"),
         ] {
@@ -670,6 +671,61 @@ async fn test_rls_policies() -> Result<(), Box<dyn std::error::Error>> {
                 .await?;
             tx.rollback().await?;
         }
+    }
+
+    // 10. Department instructions (ADR-0029): the company's (default
+    //     department) reach every answer — here for Alice, who is not a
+    //     member of it, through company_instructions(); a department's are
+    //     read under RLS for its own documents, and nothing comes from a
+    //     department the asker is not in, even when its document is named.
+    {
+        let (general_id, general_name): (Uuid, String) =
+            sqlx::query_as("SELECT id, name FROM departments WHERE is_default").fetch_one(&admin_pool).await?;
+        let alice_in_general: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM department_members WHERE user_id = $1 AND department_id = $2)")
+                .bind(alice_id)
+                .bind(general_id)
+                .fetch_one(&admin_pool)
+                .await?;
+        assert!(!alice_in_general, "the check below is about a non-member of the default department");
+        for (dept, text) in [(general_id, "Address the reader formally."), (hr_id, "Quote the policy section."), (eng_id, "Engineering secret style.")] {
+            sqlx::query("UPDATE departments SET instructions = $2 WHERE id = $1")
+                .bind(dept)
+                .bind(text)
+                .execute(&admin_pool)
+                .await?;
+        }
+        let mut docs = Vec::new();
+        for (dept, title) in [(hr_id, "hr_policy.pdf"), (eng_id, "eng_spec.pdf")] {
+            let id: Uuid = sqlx::query_scalar(
+                "INSERT INTO documents (department_id, title, file_hash, mime_type, byte_size, status, uploaded_by) \
+                 VALUES ($1, $2, $2, 'application/pdf', 1, 'ready', $3) RETURNING id",
+            )
+            .bind(dept)
+            .bind(title)
+            .bind(alice_id)
+            .fetch_one(&admin_pool)
+            .await?;
+            docs.push(id);
+        }
+
+        let mut tx = app_pool.begin().await?;
+        sqlx::query("SELECT set_config('app.current_user_id', $1, true)")
+            .bind(alice_id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        let loaded = enclave_lib::instructions::Instructions::load(&mut tx, &docs).await?;
+        let picked: Vec<(String, String)> =
+            loaded.for_documents(&docs).iter().map(|i| (i.department.clone(), i.text.clone())).collect();
+        tx.rollback().await?;
+        assert_eq!(
+            picked,
+            [
+                (general_name, "Address the reader formally.".to_string()),
+                ("HR".to_string(), "Quote the policy section.".to_string()),
+            ],
+            "Engineering's instructions must not reach a non-member"
+        );
     }
 
     Ok(())

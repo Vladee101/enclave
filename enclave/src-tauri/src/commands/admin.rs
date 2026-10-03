@@ -98,6 +98,8 @@ pub struct AdminDepartmentInfo {
     pub is_default:     bool,
     pub member_count:   i64,
     pub document_count: i64,
+    /// What the model is told for this department's answers (ADR-0029).
+    pub instructions:   Option<String>,
 }
 
 /// List every live department in the org. Admin-only — see
@@ -111,7 +113,7 @@ pub async fn cmd_list_departments(
     require_admin(&state, &session).await?;
     sqlx::query_as::<_, AdminDepartmentInfo>(
         r#"
-        SELECT d.id, d.name, d.is_default,
+        SELECT d.id, d.name, d.is_default, d.instructions,
                (SELECT count(*) FROM department_members m WHERE m.department_id = d.id) AS member_count,
                (SELECT count(*) FROM documents x WHERE x.department_id = d.id AND x.deleted_at IS NULL) AS document_count
         FROM departments d
@@ -205,6 +207,57 @@ pub async fn cmd_list_my_departments(
 }
 
 /// Create a new org-wide department. Admin-only.
+#[derive(Deserialize)]
+pub struct SetInstructionsArgs {
+    pub department_id: Uuid,
+    pub instructions:  String,
+}
+
+/// Set (or, with empty text, clear) a department's instructions for the
+/// model (ADR-0029). Admin-only, on admin_pool: app_user cannot write
+/// departments (migration 012). The text itself is not audited — only who
+/// changed whose and its length.
+#[tauri::command]
+pub async fn cmd_set_department_instructions(
+    state:   State<'_, AppState>,
+    session: State<'_, Session>,
+    args:    SetInstructionsArgs,
+) -> Result<(), AppError> {
+    let user_id = require_admin(&state, &session).await?;
+    let text = args.instructions.trim();
+    let length = text.chars().count();
+    if length > crate::instructions::MAX_CHARS {
+        return Err(AppError::new(
+            "instructions_too_long",
+            format!("Instructions are {length} characters; at most {} fit.", crate::instructions::MAX_CHARS),
+        )
+        .with("length", length)
+        .with("max", crate::instructions::MAX_CHARS));
+    }
+
+    let mut tx = state.admin_pool.begin().await.map_err(AppError::of)?;
+    let updated = sqlx::query("UPDATE departments SET instructions = NULLIF($2, '') WHERE id = $1 AND deleted_at IS NULL")
+        .bind(args.department_id)
+        .bind(text)
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::of)?;
+    if updated.rows_affected() == 0 {
+        return Err(AppError::new("department_not_found", "Department not found."));
+    }
+    audit::record(
+        &mut tx,
+        Some(user_id),
+        Some(args.department_id),
+        event::DEPARTMENT_INSTRUCTIONS_CHANGED,
+        serde_json::json!({ "length": length }),
+    )
+    .await
+    .map_err(AppError::of)?;
+    tx.commit().await.map_err(AppError::of)?;
+    Ok(())
+}
+
 #[derive(Deserialize)]
 pub struct CreateDeptArgs {
     pub name: String,

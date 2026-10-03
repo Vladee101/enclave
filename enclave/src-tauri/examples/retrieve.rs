@@ -2,7 +2,7 @@
 //! go into the prompt — for "why wasn't X found?" and "what did it compute?"
 //! without the UI.
 //!
-//!   APP_DATABASE_URL=… cargo run --example retrieve -- <username> "<question>" [top_k] [--answer] [--pick N] [--in <document id>]…
+//!   APP_DATABASE_URL=… cargo run --example retrieve -- <username> "<question>" [top_k] [--answer] [--prompt] [--pick N] [--in <document id>]…
 //!
 //! Needs the app's servers running (chat on 8080, embeddings on 8081).
 //! Calls `commands::query::prepare` — the function cmd_query uses — so the
@@ -22,6 +22,7 @@ use enclave_lib::{
 async fn main() -> anyhow::Result<()> {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let answer = raw.iter().any(|a| a == "--answer");
+    let show_prompt = raw.iter().any(|a| a == "--prompt");
     // One --pick per clarification, in order: a chosen option is checked
     // again and may ask the next question.
     let picks: Vec<usize> = raw
@@ -76,6 +77,10 @@ async fn main() -> anyhow::Result<()> {
         prepared = prepare(&pool, &llm, user_id, &query).await.map_err(|e| anyhow::anyhow!(e))?;
     }
     println!("prepared in {:.0} ms", started.elapsed().as_secs_f64() * 1000.0);
+    if show_prompt {
+        println!("PROMPT (chat template applied):
+{}", prepared.prompt);
+    }
 
     match &prepared.calculation {
         Some(calculation) => println!("CALCULATION\n{calculation}"),

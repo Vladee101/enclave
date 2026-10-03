@@ -8,7 +8,10 @@ import { FormField } from '../components/FormField';
 import { ErrorText } from '../components/ErrorText';
 import { BackupCard } from '../components/BackupCard';
 
-interface Dept    { id: string; name: string; is_default: boolean; member_count: number; document_count: number; }
+interface Dept    { id: string; name: string; is_default: boolean; member_count: number; document_count: number; instructions: string | null; }
+
+/** Same limit as the core (instructions::MAX_CHARS) and migration 019. */
+const MAX_INSTRUCTIONS = 1000;
 interface Adapter { id: string; department_id: string; adapter_path: string; scale: number; is_active: boolean; }
 interface UserRow { id: string; username: string; is_admin: boolean; }
 interface Membership { user_id: string; username: string; department_id: string; department_name: string; }
@@ -38,6 +41,22 @@ export function AdminPage() {
   const [audit,       setAudit]       = useState<AuditEntry[]>([]);
   const [saving, setSaving] = useState(false);
   const [error,  setError]  = useState<string | null>(null);
+  // The department whose instructions (ADR-0029) are open for editing.
+  const [editing, setEditing] = useState<{ id: string; text: string } | null>(null);
+
+  async function saveInstructions() {
+    if (!editing) return;
+    setError(null);
+    try {
+      await invoke('cmd_set_department_instructions', {
+        args: { department_id: editing.id, instructions: editing.text },
+      });
+      setEditing(null);
+      await load();
+    } catch (e) {
+      setError(tError(e));
+    }
+  }
 
   async function load() {
     if (!user) return;
@@ -155,14 +174,23 @@ export function AdminPage() {
             </thead>
             <tbody>
               {depts.map(d => (
-                <tr key={d.id}>
+                <React.Fragment key={d.id}>
+                <tr>
                   <td style={{ fontWeight: 500 }}>
                     {d.name}
                     {d.is_default && <> <Badge cls="badge-info">{t('admin.defaultBadge')}</Badge></>}
                   </td>
                   <td>{d.member_count}</td>
                   <td>{d.document_count}</td>
-                  <td style={{ textAlign: 'right' }}>
+                  <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                    <Button
+                      variant="ghost"
+                      onClick={() => setEditing(editing?.id === d.id ? null : { id: d.id, text: d.instructions ?? '' })}
+                      aria-expanded={editing?.id === d.id}
+                    >
+                      {t('admin.instructions')}
+                      {d.instructions && <> <Badge cls="badge-success">{t('admin.instructionsSet')}</Badge></>}
+                    </Button>
                     {!d.is_default && (
                       <Button variant="ghost" onClick={() => deleteDept(d)} aria-label={t('admin.deleteDeptAria', { name: d.name })}>
                         {t('common.delete')}
@@ -170,6 +198,32 @@ export function AdminPage() {
                     )}
                   </td>
                 </tr>
+                {editing?.id === d.id && (
+                  <tr className="instructions-row">
+                    <td colSpan={4}>
+                      <div className="text-sm text-muted" style={{ marginBottom: 6 }}>
+                        {d.is_default ? t('admin.instructionsHintDefault') : t('admin.instructionsHintDept', { name: d.name })}
+                      </div>
+                      <textarea
+                        className="input instructions-input"
+                        rows={4}
+                        maxLength={MAX_INSTRUCTIONS}
+                        placeholder={t('admin.instructionsPlaceholder')}
+                        value={editing.text}
+                        onChange={e => setEditing({ id: d.id, text: e.target.value })}
+                        aria-label={t('admin.instructionsFor', { name: d.name })}
+                      />
+                      <div className="flex justify-between items-center" style={{ marginTop: 6 }}>
+                        <span className="text-sm text-muted">{editing.text.length} / {MAX_INSTRUCTIONS}</span>
+                        <div className="flex gap-2">
+                          <Button variant="ghost" onClick={() => setEditing(null)}>{t('admin.cancel')}</Button>
+                          <Button onClick={saveInstructions}>{t('admin.save')}</Button>
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+                </React.Fragment>
               ))}
             </tbody>
           </table>

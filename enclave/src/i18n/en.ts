@@ -128,6 +128,14 @@ export const en = {
     deleteDeptConfirmBody: "The documents' text is removed from search immediately. Users stay, in their other departments. This cannot be undone.",
     nDocuments: ['{count} document', '{count} documents'],
     nMemberships: ['{count} membership', '{count} memberships'],
+    instructions: 'Instructions',
+    instructionsSet: 'set',
+    instructionsFor: 'Instructions for {name}',
+    instructionsHintDefault: "What the assistant is told for every answer — the whole company's conventions. It never overrides the documents: answers still come only from them, with citations.",
+    instructionsHintDept: 'What the assistant is told for answers based on documents of {name}. It never overrides the documents: answers still come only from them, with citations.',
+    instructionsPlaceholder: 'For example: answer formally, refer to contract clauses by number, give amounts including VAT.',
+    save: 'Save',
+    cancel: 'Cancel',
   },
 
   backup: {
@@ -200,6 +208,7 @@ export const en = {
     backup_format: 'Backup format {format} is not supported by this version of Enclave.',
     backup_newer: 'This backup was made by a newer Enclave ({version}). Update Enclave first.',
     backup_migration: 'The database in the backup could not be brought up to this version of Enclave.',
+    instructions_too_long: 'The instructions are {length} characters long; at most {max} fit.',
   },
 
   docsPanel: {

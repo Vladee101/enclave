@@ -1,4 +1,5 @@
 use crate::error::AppError;
+use crate::instructions::{self, Instructions};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use tauri::{AppHandle, Emitter, State};
@@ -134,6 +135,10 @@ pub async fn prepare(
     } else {
         plan::load_candidates(&mut tx, scope.unwrap_or(&retrieved)).await.map_err(e)?
     };
+    // Department instructions (ADR-0029) for every document the answer
+    // may rest on, read now — under RLS, before any transaction closes.
+    let considered: Vec<Uuid> = retrieved.iter().copied().chain(candidates.iter().map(|c| c.document_id)).collect();
+    let instructions = Instructions::load(&mut tx, &considered).await.map_err(e)?;
 
     let computation = if candidates.is_empty() {
         audit_retrieval(&mut tx, user_id, &chunks, top_k).await.map_err(e)?;
@@ -212,11 +217,13 @@ pub async fn prepare(
 
     // Transactions are committed — these HTTP calls hold no connection.
     match computation {
-        Some(c) => computed(llm, lora, &c, &args.query).await,
+        Some(c) => computed(llm, lora, &c, &args.query, &instructions).await,
         None => {
-            let (system, user) = grounded_messages(&chunks, &args.query);
+            let (rules, user) = grounded_messages(&chunks, &args.query);
+            let used: Vec<Uuid> = chunks.iter().map(|c| c.document_id).collect();
+            let system = instructions::system_prompt(rules, &instructions.for_documents(&used));
             Ok(Prepared {
-                prompt: llm.apply_template(system, &user).await.map_err(e)?,
+                prompt: llm.apply_template(&system, &user).await.map_err(e)?,
                 answer: None,
                 lora,
                 sources: into_sources(chunks),
@@ -249,6 +256,7 @@ async fn prepare_chosen(
         .map_err(e)?
         .ok_or_else(|| AppError::new("table_gone", "The table is no longer available."))?;
     let candidates = [candidate];
+    let instructions = Instructions::load(&mut tx, &[candidates[0].document_id]).await.map_err(e)?;
     let plan = plan::parse_plan(&chosen.plan.to_string(), &candidates)
         .map_err(e)?
         .ok_or_else(|| AppError::new("option_not_calculation", "The chosen option is not a calculation."))?;
@@ -291,7 +299,7 @@ async fn prepare_chosen(
     audit_computation(&mut tx, user_id, &computation, top_k).await.map_err(e)?;
     tx.commit().await.map_err(db)?;
 
-    computed(llm, lora, &computation, &args.query).await
+    computed(llm, lora, &computation, &args.query, &instructions).await
 }
 
 /// The answer prompt for a computation, with the computation as its only
@@ -301,14 +309,17 @@ async fn computed(
     lora:        Vec<crate::llm::LoraEntry>,
     computation: &plan::Computation,
     question:    &str,
+    instructions: &Instructions,
 ) -> Result<Prepared, AppError> {
     let description = computation.describe();
     let answer = computation.grouped_answer();
     let prompt = match answer {
         Some(_) => String::new(),
         None => {
-            let (system, user) = plan::answer_messages(computation, question);
-            llm.apply_template(system, &user).await.map_err(AppError::of)?
+            let (rules, user) = plan::answer_messages(computation, question);
+            let system =
+                instructions::system_prompt(rules, &instructions.for_documents(&[computation.candidate.document_id]));
+            llm.apply_template(&system, &user).await.map_err(AppError::of)?
         }
     };
     Ok(Prepared {

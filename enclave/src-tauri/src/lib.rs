@@ -7,6 +7,7 @@ pub mod audit;
 pub mod backup;
 pub mod session;
 pub mod error;
+pub mod instructions;
 pub mod tables;
 
 use sqlx::PgPool;
@@ -100,6 +101,7 @@ pub fn run() {
             commands::admin::cmd_list_my_departments,
             commands::admin::cmd_create_department,
             commands::admin::cmd_delete_department,
+            commands::admin::cmd_set_department_instructions,
             commands::admin::cmd_list_memberships,
             commands::admin::cmd_add_member,
             commands::admin::cmd_remove_member,

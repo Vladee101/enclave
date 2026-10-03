@@ -32,7 +32,7 @@ Feature-complete for a single machine and shipped as a Windows installer.
   `ingest/`, `tables/` (plans + aggregates), `llm/` (sidecars, model and
   engine downloads), `db/` (pools, RLS helper, embedded PostgreSQL),
   `backup.rs`, `error.rs`.
-- Schema: `migrations/001-018`, applied at every start. `db/schema.sql` is
+- Schema: `migrations/001-019`, applied at every start. `db/schema.sql` is
   historical reference only — **the schema is what the migrations build.**
 - Frontend: `src/` — pages, `components/`, `i18n/{en,ru}.ts` (typed: a key
   missing in one fails `tsc`).
@@ -114,7 +114,11 @@ live in `src-tauri/tauri.bundle.json`, merged only by that script.
   Windows hypervisor and Memory integrity off (NEM hangs Windows setup) —
   turn both back on afterwards.
 - **Code signing** (SmartScreen warns about an unknown publisher).
-- **LoRA adapters:** wired end to end, never exercised with a real adapter.
+- **LoRA adapters:** optional expert feature since ADR-0029 (department
+  voice = admin instructions). Wired end to end, never exercised with a real
+  adapter; known risks: an incompatible adapter file likely stops
+  llama-server, a new adapter needs a restart, the admin hint names the dev
+  folder `binaries/adapters/`.
 - **OCR of scans: done** with Windows' own recognizer (ADR-0028). Open:
   tables on scans stay text (no calculations), mixed PDFs (some pages
   scanned) are read by their text layer only; Tesseract if real scans

@@ -6,7 +6,7 @@
 ## What this file is
 
 A build brief for the coding agent. **The source of truth for *why* is
-`docs/adr/`** — twenty-eight accepted Architecture Decision Records (0001–0028; 0011 superseded by 0021). This file says *what
+`docs/adr/`** — twenty-nine accepted Architecture Decision Records (0001–0029; 0011 superseded by 0021). This file says *what
 to build, in what order, and which invariants must never be broken.* When a
 decision here seems arbitrary, the matching ADR explains it. Do not contradict
 an ADR; if reality forces a change, write a new ADR that supersedes the old one
@@ -206,6 +206,12 @@ implementation.
   Deep in `anyhow` code, raise it with `bail!(AppError::new(…))` and
   convert at the command with `AppError::from_anyhow`. The core never
   sends UI wording; proper names (files, columns, models) go as they are.
+- **Department voice is an instruction, not an adapter (ADR-0029).**
+  `departments.instructions` (≤ 1000 chars, admin-only write) goes into
+  the prompt after the answer rules: the default department's for every
+  answer, a department's for answers built on its documents — read under
+  RLS in the question's transaction (`instructions::Instructions`). LoRA
+  stays as an optional expert feature; don't build training for it.
 - **The schema is what the migrations build.** The dev database was once
   hand-built from `db/schema.sql` and still has columns no migration
   creates; code that relies on one works there and fails on every new

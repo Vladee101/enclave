@@ -1004,3 +1004,7 @@ code, .mono {
 
 /* ── OCR mark on a document (ADR-0028) ── */
 .doc-ocr { color: var(--warning); cursor: help; }
+
+/* ── Department instructions (ADR-0029) ── */
+.instructions-row td { background: var(--bg-elevated); }
+.instructions-input { width: 100%; resize: vertical; font-family: inherit; line-height: 1.45; }
