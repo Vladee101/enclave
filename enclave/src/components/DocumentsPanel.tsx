@@ -1,3 +1,4 @@
+import type React from 'react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useI18n, type TStringKey } from '../i18n';
@@ -48,6 +49,8 @@ interface Props {
   onToggleSelect: (doc: DocInfo) => void;
   /** The list as loaded, so that deleted documents leave the selection. */
   onLoaded?: (docs: DocInfo[]) => void;
+  /** Tabs shown at the top of the side panel (chats | documents). */
+  tabs?: React.ReactNode;
 }
 
 /**
@@ -57,7 +60,7 @@ interface Props {
  * name into the question — asked in the table's own words, a calculation
  * needs no clarification (ADR-0023). Names and types only — no cell values.
  */
-export function DocumentsPanel({ onInsert, selected, onToggleSelect, onLoaded }: Props) {
+export function DocumentsPanel({ onInsert, selected, onToggleSelect, onLoaded, tabs }: Props) {
   const { t, tError, tPlural, formatNumber } = useI18n();
   const [docs,     setDocs]     = useState<DocInfo[]>([]);
   const [tables,   setTables]   = useState<TableOutline[]>([]);
@@ -101,6 +104,7 @@ export function DocumentsPanel({ onInsert, selected, onToggleSelect, onLoaded }:
 
   return (
     <aside className="docs-panel">
+      {tabs}
       <div className="docs-panel-header">
         <span>{t('docsPanel.title')}</span>
         <button type="button" className="docs-panel-refresh" onClick={load} disabled={loading} title={t('docsPanel.refresh')}>

@@ -29,6 +29,14 @@ pub struct QueryArgs {
     /// user cannot see find nothing (RLS), they are not an error.
     #[serde(default)]
     pub document_ids: Option<Vec<Uuid>>,
+    /// The conversation this question continues (ADR-0030); None starts
+    /// a new one.
+    #[serde(default)]
+    pub conversation_id: Option<Uuid>,
+    /// The question as the user's message shows it — the label of a
+    /// clarification's option; `query` when absent.
+    #[serde(default)]
+    pub shown: Option<String>,
 }
 
 impl QueryArgs {
@@ -61,6 +69,9 @@ pub struct QueryResult {
     /// Set instead of an answer when the calculation needs the user's
     /// choice first; `answer` then holds its question.
     pub clarification: Option<plan::Clarification>,
+    /// The conversation the exchange was saved in; None if saving failed
+    /// (the answer is still given — history is not worth losing it).
+    pub conversation_id: Option<Uuid>,
 }
 
 /// Everything the completion needs, and what to show next to the answer.
@@ -77,6 +88,10 @@ pub struct Prepared {
     /// The calculation itself — plan and result groups — for tools that
     /// check the numbers (`examples/table_eval.rs`); the UI gets the text.
     pub computation:   Option<plan::Computation>,
+    /// Every document the answer rests on — its sources, the table of a
+    /// calculation or of a clarification. Chat history hides the answer
+    /// once any of them is out of the reader's reach (ADR-0030).
+    pub rests_on:      Vec<Uuid>,
 }
 
 /// Shared prep for both blocking and streaming query commands (and the
@@ -185,6 +200,7 @@ pub async fn prepare(
                 calculation: None,
                 clarification: Some(clarification),
                 computation: None,
+                rests_on: document_id.into_iter().collect(),
             });
         }
 
@@ -221,7 +237,7 @@ pub async fn prepare(
         None => {
             let (rules, user) = grounded_messages(&chunks, &args.query);
             let used: Vec<Uuid> = chunks.iter().map(|c| c.document_id).collect();
-            let system = instructions::system_prompt(rules, &instructions.for_documents(&used));
+            let system = instructions::system_prompt(&rules, &instructions.for_documents(&used));
             Ok(Prepared {
                 prompt: llm.apply_template(&system, &user).await.map_err(e)?,
                 answer: None,
@@ -230,6 +246,7 @@ pub async fn prepare(
                 calculation: None,
                 clarification: None,
                 computation: None,
+                rests_on: used,
             })
         }
     }
@@ -293,6 +310,7 @@ async fn prepare_chosen(
             calculation: None,
             clarification: Some(clarification),
             computation: None,
+            rests_on: vec![candidates[0].document_id],
         });
     }
     let computation = plan::execute(&mut tx, &candidates, plan).await.map_err(e)?;
@@ -318,7 +336,7 @@ async fn computed(
         None => {
             let (rules, user) = plan::answer_messages(computation, question);
             let system =
-                instructions::system_prompt(rules, &instructions.for_documents(&[computation.candidate.document_id]));
+                instructions::system_prompt(&rules, &instructions.for_documents(&[computation.candidate.document_id]));
             llm.apply_template(&system, &user).await.map_err(AppError::of)?
         }
     };
@@ -335,6 +353,7 @@ async fn computed(
         calculation: Some(description),
         clarification: None,
         computation: Some(computation.clone()),
+        rests_on: vec![computation.candidate.document_id],
     })
 }
 
@@ -407,17 +426,19 @@ async fn ask_planner(llm: &LlmClient, candidates: &[plan::Candidate], question: 
 ///
 /// Document text goes in the user turn as quoted material, never in the
 /// system turn: an instruction planted in a document stays data.
-pub fn grounded_messages(chunks: &[retrieval::RetrievedChunk], question: &str) -> (&'static str, String) {
+pub fn grounded_messages(chunks: &[retrieval::RetrievedChunk], question: &str) -> (String, String) {
     let context = chunks
         .iter()
         .enumerate()
         .map(|(i, c)| format!("[Source {}] {}\n{}", i + 1, c.filename, c.content))
         .collect::<Vec<_>>()
         .join("\n\n");
-    let system = "You answer questions about the organization's documents. \
-                  Use only the sources given in the user's message and cite them as [Source N]. \
-                  If the sources do not contain the answer, say so. \
-                  Answer once, concisely, in the language of the question.";
+    let system = format!(
+        "You answer questions about the organization's documents. \
+         Use only the sources given in the user's message and cite them as [Source N]. \
+         If the sources do not contain the answer, say so. Answer once, concisely. {}",
+        instructions::language_rule(question)
+    );
     (system, format!("Sources:\n\n{context}\n\nQuestion: {question}"))
 }
 
@@ -454,10 +475,12 @@ pub async fn cmd_query(
 ) -> Result<QueryResult, AppError> {
     let user_id = session.require()?.id;
     let llm = require_llm(&llm)?;
-    let Prepared { prompt, answer, lora, sources, calculation, clarification, .. } =
+    let Prepared { prompt, answer, lora, sources, calculation, clarification, rests_on, .. } =
         prepare(&state.app_pool, llm, user_id, &args).await?;
     if let Some(answer) = answer {
-        return Ok(QueryResult { answer, sources, calculation, clarification });
+        let conversation_id =
+            remember(&state.app_pool, user_id, &args, &answer, &sources, calculation.as_deref(), clarification.is_some(), &rests_on).await;
+        return Ok(QueryResult { answer, sources, calculation, clarification, conversation_id });
     }
 
     let req = CompletionRequest {
@@ -469,8 +492,9 @@ pub async fn cmd_query(
         json_schema: None,
     };
     let answer = llm.complete(&req).await.map_err(AppError::of)?;
-
-    Ok(QueryResult { answer, sources, calculation, clarification: None })
+    let conversation_id =
+        remember(&state.app_pool, user_id, &args, &answer, &sources, calculation.as_deref(), false, &rests_on).await;
+    Ok(QueryResult { answer, sources, calculation, clarification: None, conversation_id })
 }
 
 /// Token payload emitted on `llm-token:<request_id>` as the answer streams in.
@@ -492,13 +516,15 @@ pub async fn cmd_query_stream(
 ) -> Result<QueryResult, AppError> {
     let user_id = session.require()?.id;
     let llm = require_llm(&llm)?;
-    let Prepared { prompt, answer, lora, sources, calculation, clarification, .. } =
+    let Prepared { prompt, answer, lora, sources, calculation, clarification, rests_on, .. } =
         prepare(&state.app_pool, llm, user_id, &args).await?;
     let event_name = format!("llm-token:{request_id}");
     if let Some(answer) = answer {
         // Delivered the way a stream is, in one piece.
         let _ = app.emit(&event_name, StreamToken { token: answer.clone() });
-        return Ok(QueryResult { answer, sources, calculation, clarification });
+        let conversation_id =
+            remember(&state.app_pool, user_id, &args, &answer, &sources, calculation.as_deref(), clarification.is_some(), &rests_on).await;
+        return Ok(QueryResult { answer, sources, calculation, clarification, conversation_id });
     }
 
     let req = CompletionRequest {
@@ -516,8 +542,42 @@ pub async fn cmd_query_stream(
         })
         .await
         .map_err(AppError::of)?;
+    let conversation_id =
+        remember(&state.app_pool, user_id, &args, &answer, &sources, calculation.as_deref(), false, &rests_on).await;
+    Ok(QueryResult { answer, sources, calculation, clarification: None, conversation_id })
+}
 
-    Ok(QueryResult { answer, sources, calculation, clarification: None })
+/// Save the exchange in the asker's history (ADR-0030), after the answer
+/// is complete. A failure costs the history entry, not the answer: logged,
+/// and the result carries no conversation.
+#[allow(clippy::too_many_arguments)]
+async fn remember(
+    pool:          &PgPool,
+    user_id:       Uuid,
+    args:          &QueryArgs,
+    answer:        &str,
+    sources:       &[SourceRef],
+    calculation:   Option<&str>,
+    clarification: bool,
+    rests_on:      &[Uuid],
+) -> Option<Uuid> {
+    let exchange = crate::chat::Exchange {
+        conversation_id: args.conversation_id,
+        question: args.shown.as_deref().unwrap_or(&args.query),
+        scope: args.document_ids.as_deref().unwrap_or(&[]),
+        answer,
+        sources: serde_json::to_value(sources).unwrap_or_default(),
+        calculation,
+        clarification,
+        rests_on,
+    };
+    match crate::chat::record(pool, user_id, &exchange).await {
+        Ok(id) => Some(id),
+        Err(e) => {
+            tracing::warn!("The exchange was not saved in the chat history: {e:#}");
+            None
+        }
+    }
 }
 
 #[cfg(test)]

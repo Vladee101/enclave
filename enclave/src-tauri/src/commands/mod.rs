@@ -4,3 +4,4 @@ pub mod query;
 pub mod admin;
 pub mod models;
 pub mod backup;
+pub mod chat;

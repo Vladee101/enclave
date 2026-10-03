@@ -5,6 +5,7 @@ pub mod retrieval;
 pub mod commands;
 pub mod audit;
 pub mod backup;
+pub mod chat;
 pub mod session;
 pub mod error;
 pub mod instructions;
@@ -112,6 +113,10 @@ pub fn run() {
             commands::models::cmd_download_models,
             commands::models::cmd_import_model,
             commands::models::cmd_restart_app,
+            commands::chat::cmd_list_conversations,
+            commands::chat::cmd_get_conversation,
+            commands::chat::cmd_rename_conversation,
+            commands::chat::cmd_delete_conversation,
             commands::backup::cmd_backup_create,
             commands::backup::cmd_backup_inspect,
             commands::backup::cmd_backup_restore,

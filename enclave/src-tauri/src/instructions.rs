@@ -98,6 +98,25 @@ impl Instructions {
     }
 }
 
+/// The answer's language, stated by the core rather than left to the model.
+/// "In the language of the question" was not enough for Qwen3-4B: over an
+/// English document it answered Russian questions in English (8 of 32) and
+/// slipped Chinese into them (4 of 32). A question with Cyrillic in it gets
+/// "in Russian" outright.
+pub fn language_rule(question: &str) -> &'static str {
+    let russian = question.chars().any(|c| matches!(c, 'а'..='я' | 'А'..='Я' | 'ё' | 'Ё'));
+    if russian {
+        "Write the whole answer in Russian, even when the sources are in English or another language. \
+         Never switch to another language or script in the middle of the answer — no Chinese, Japanese or \
+         Korean characters. Keep names, identifiers, code and quotations from the sources as they are."
+    } else {
+        "Write the whole answer in the language of the question, even when the sources are in another language. \
+         Never switch to another language or script in the middle of the answer — no Chinese, Japanese or \
+         Korean characters unless the question is written in them. Keep names, identifiers, code and \
+         quotations from the sources as they are."
+    }
+}
+
 /// `base` (the answer's rules) followed by the instructions, if any.
 pub fn system_prompt(base: &str, instructions: &[&Instruction]) -> String {
     if instructions.is_empty() {
@@ -147,6 +166,12 @@ mod tests {
         // A document the asker cannot see (not loaded under RLS) adds nothing.
         let picked: Vec<&str> = set.for_documents(&[Uuid::new_v4()]).iter().map(|i| i.department.as_str()).collect();
         assert_eq!(picked, ["General"]);
+    }
+
+    #[test]
+    fn the_language_is_named_for_a_russian_question() {
+        assert!(language_rule("Что сказано про frontend?").starts_with("Write the whole answer in Russian"));
+        assert!(language_rule("What does it say about the frontend?").starts_with("Write the whole answer in the language of the question"));
     }
 
     #[test]

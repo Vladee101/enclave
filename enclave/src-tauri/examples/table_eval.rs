@@ -161,7 +161,14 @@ async fn run_case(
     case: &Case,
 ) -> Result<Outcome> {
     let started = Instant::now();
-    let mut args = QueryArgs { query: case.question.clone(), top_k: Some(5), plan: None, document_ids: None };
+    let mut args = QueryArgs {
+        query: case.question.clone(),
+        top_k: Some(5),
+        plan: None,
+        document_ids: None,
+        conversation_id: None,
+        shown: None,
+    };
     let mut picks = case.picks.clone();
     let mut asked = Vec::new();
     let mut prepared: Prepared = prepare(app, llm, user_id, &args).await.map_err(|e| anyhow::anyhow!(e))?;
@@ -186,8 +193,11 @@ async fn run_case(
         prepared = prepare(app, llm, user_id, &args).await.map_err(|e| anyhow::anyhow!(e))?;
     }
 
+    // The whole text of the sources, as the model gets it in the prompt —
+    // not the 200-character excerpts shown under the answer: in a
+    // spreadsheet row the column asked about may come after them.
     let in_sources = |needle: &str| {
-        if prepared.sources.iter().any(|s| s.excerpt.contains(needle)) {
+        if prepared.prompt.contains(needle) || prepared.sources.iter().any(|s| s.excerpt.contains(needle)) {
             Ok(format!("search, «{needle}» in the sources"))
         } else {
             Err(format!("search, but no source contains «{needle}»"))

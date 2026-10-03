@@ -1,9 +1,11 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { useAuth } from '../contexts/AuthContext';
 import { useI18n } from '../i18n';
 import { useLlmStream, type ChosenPlan, type Clarification } from '../hooks/useLlmStream';
 import { Spinner } from '../components/Spinner';
 import { DocumentsPanel, type DocInfo } from '../components/DocumentsPanel';
+import { ConversationsPanel } from '../components/ConversationsPanel';
 
 interface SourceRef {
   document_id: string;
@@ -23,7 +25,63 @@ interface Message {
   question?: string;
   /** The documents a question was limited to, shown under it. */
   scope?: ScopeDoc[];
+  /** From history: the answer rests on documents no longer in reach. */
+  hidden?: boolean;
+  /** From history: a clarification, whose options are not kept. */
+  pastClarification?: boolean;
 }
+
+/** A saved message as `cmd_get_conversation` returns it (ADR-0030). */
+interface StoredMessage {
+  role:          'user' | 'assistant';
+  content:       string | null;
+  hidden:        boolean;
+  sources:       SourceRef[];
+  calculation:   string | null;
+  clarification: boolean;
+  scope:         ScopeDoc[];
+}
+
+/**
+ * Sources are chunks, several often from one document: one chip per
+ * document, in order of its first source, with the numbers its chunks
+ * have in the answer's [Source N].
+ */
+interface SourceGroup {
+  documentId: string;
+  filename:   string;
+  numbers:    number[];
+  excerpts:   string[];
+}
+
+function groupSources(sources: SourceRef[]): SourceGroup[] {
+  const groups: SourceGroup[] = [];
+  sources.forEach((s, i) => {
+    let g = groups.find(g => g.documentId === s.document_id);
+    if (!g) {
+      g = { documentId: s.document_id, filename: s.filename, numbers: [], excerpts: [] };
+      groups.push(g);
+    }
+    g.numbers.push(i + 1);
+    g.excerpts.push(`[${i + 1}] ${s.excerpt}`);
+  });
+  return groups;
+}
+
+/** 1,2,3,5 → "1–3, 5". */
+function compactNumbers(ns: number[]): string {
+  const parts: string[] = [];
+  for (let i = 0; i < ns.length; ) {
+    let j = i;
+    while (j + 1 < ns.length && ns[j + 1] === ns[j] + 1) j++;
+    parts.push(j > i ? `${ns[i]}–${ns[j]}` : `${ns[i]}`);
+    i = j + 1;
+  }
+  return parts.join(', ');
+}
+
+/** The last conversation open, per user — reopened when the chat is. */
+const lastKey = (userId: string) => `enclave.chat.${userId}`;
 
 type ScopeDoc = Pick<DocInfo, 'id' | 'filename'>;
 
@@ -33,6 +91,64 @@ export function ChatPage() {
   const { partial, sources, calculation, clarification, streaming, ask } = useLlmStream();
   const [messages, setMessages]   = useState<Message[]>([]);
   const [input,    setInput]      = useState('');
+  // The open conversation (ADR-0030): null until the first exchange of a
+  // new chat is saved. The list refreshes when refreshKey changes.
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [sideTab, setSideTab] = useState<'chats' | 'documents'>(() => {
+    try { return localStorage.getItem('enclave.sideTab') === 'documents' ? 'documents' : 'chats'; } catch { return 'chats'; }
+  });
+  const chooseTab = (tab: 'chats' | 'documents') => {
+    setSideTab(tab);
+    try { localStorage.setItem('enclave.sideTab', tab); } catch { /* ignore */ }
+  };
+
+  const remember = useCallback((id: string | null) => {
+    setConversationId(id);
+    if (!user) return;
+    try {
+      if (id) localStorage.setItem(lastKey(user.id), id);
+      else localStorage.removeItem(lastKey(user.id));
+    } catch { /* storage unavailable: nothing is reopened */ }
+  }, [user]);
+
+  const openConversation = useCallback(async (id: string) => {
+    try {
+      const stored = await invoke<StoredMessage[]>('cmd_get_conversation', { conversationId: id });
+      setMessages(stored.map(m => ({
+        id: nextId.current++,
+        role: m.role === 'user' ? 'user' : 'bot',
+        content: m.hidden ? t('chat.hiddenAnswer') : (m.content ?? ''),
+        sources: m.sources,
+        calculation: m.calculation,
+        scope: m.scope,
+        hidden: m.hidden,
+        pastClarification: m.role === 'assistant' && m.clarification && !m.hidden,
+      })));
+      remember(id);
+      setTimeout(scrollBottom, 50);
+    } catch {
+      // Deleted elsewhere, or not this user's: start afresh.
+      remember(null);
+      setMessages([]);
+    }
+  }, [remember, t]);
+
+  const newChat = useCallback(() => {
+    remember(null);
+    setMessages([]);
+    inputRef.current?.focus();
+  }, [remember]);
+
+  // Reopen the last conversation when the chat page opens — after a page
+  // switch or a restart, the chat is where it was left.
+  useEffect(() => {
+    if (!user) return;
+    let last: string | null = null;
+    try { last = localStorage.getItem(lastKey(user.id)); } catch { /* none */ }
+    if (last) openConversation(last);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
   const streamingId = useRef<number | null>(null);
   const nextId   = useRef(1);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -104,7 +220,11 @@ export function ChatPage() {
     setTimeout(scrollBottom, 50);
 
     try {
-      await ask(q, 5, plan, limitTo.map(d => d.id));
+      const result = await ask(q, 5, plan, limitTo.map(d => d.id), conversationId, shown);
+      if (result?.conversation_id) {
+        remember(result.conversation_id);
+        setRefreshKey(k => k + 1);
+      }
     } catch (e) {
       setMessages(prev => prev.map(m => (
         m.id === botId ? { ...m, content: t('chat.error', { error: tError(e) }) } : m
@@ -113,7 +233,7 @@ export function ChatPage() {
       streamingId.current = null;
       setTimeout(scrollBottom, 50);
     }
-  }, [streaming, user, ask, t]);
+  }, [streaming, user, ask, t, tError, conversationId, remember]);
 
   const sendMessage = useCallback(() => {
     const q = input.trim();
@@ -131,14 +251,37 @@ export function ChatPage() {
 
   return (
     <div className="chat-page">
-    {panelOpen && (
-      <DocumentsPanel
-        onInsert={insertAtCursor}
-        selected={scope.map(d => d.id)}
-        onToggleSelect={toggleScope}
-        onLoaded={pruneScope}
-      />
-    )}
+    {panelOpen && (() => {
+      const tabs = (
+        <div className="side-tabs" role="tablist">
+          <button type="button" role="tab" aria-selected={sideTab === 'chats'} className={sideTab === 'chats' ? 'on' : ''} onClick={() => chooseTab('chats')}>
+            {t('chat.tabChats')}
+          </button>
+          <button type="button" role="tab" aria-selected={sideTab === 'documents'} className={sideTab === 'documents' ? 'on' : ''} onClick={() => chooseTab('documents')}>
+            {t('chat.tabDocuments')}
+          </button>
+        </div>
+      );
+      return sideTab === 'chats' ? (
+        <ConversationsPanel
+          tabs={tabs}
+          currentId={conversationId}
+          refreshKey={refreshKey}
+          busy={streaming}
+          onOpen={openConversation}
+          onNew={newChat}
+          onDeleted={id => { if (id === conversationId) newChat(); }}
+        />
+      ) : (
+        <DocumentsPanel
+          tabs={tabs}
+          onInsert={insertAtCursor}
+          selected={scope.map(d => d.id)}
+          onToggleSelect={toggleScope}
+          onLoaded={pruneScope}
+        />
+      );
+    })()}
     <button
       type="button"
       className="docs-panel-toggle"
@@ -182,7 +325,7 @@ export function ChatPage() {
                   <span style={{ color: 'var(--text-secondary)', fontSize: 13 }}>{t('chat.thinking')}</span>
                 </div>
               ) : (
-                <div className="message-bubble">{msg.content}</div>
+                <div className={`message-bubble${msg.hidden ? ' message-hidden' : ''}`}>{msg.content}</div>
               )}
               {msg.role === 'user' && msg.scope && msg.scope.length > 0 && (
                 <div className="message-scope">{t('chat.inScope', { files: msg.scope.map(d => d.filename).join(', ') })}</div>
@@ -202,6 +345,9 @@ export function ChatPage() {
                   ))}
                 </div>
               )}
+              {msg.pastClarification && (
+                <div className="message-scope">{t('chat.pastClarification')}</div>
+              )}
               {msg.calculation && (
                 <details className="message-calculation">
                   <summary>{t('chat.howCalculated')}</summary>
@@ -210,9 +356,10 @@ export function ChatPage() {
               )}
               {msg.sources && msg.sources.length > 0 && (
                 <div className="message-sources">
-                  {msg.sources.map((s, i) => (
-                    <span key={i} className="source-chip" title={s.excerpt}>
-                      📄 {s.filename}
+                  {groupSources(msg.sources).map(g => (
+                    <span key={g.documentId} className="source-chip" title={g.excerpts.join('\n\n')}>
+                      📄 {g.filename}
+                      <span className="source-nums">{compactNumbers(g.numbers)}</span>
                     </span>
                   ))}
                 </div>

@@ -64,6 +64,14 @@ export const ru: Dict = {
     send: 'Отправить сообщение',
     removeScope: 'Убрать {name}',
     error: '⚠️ Ошибка: {error}',
+    tabChats: 'Чаты',
+    tabDocuments: 'Документы',
+    newChat: '+ Новый чат',
+    noConversations: 'Чатов пока нет.',
+    rename: 'Переименовать',
+    deleteConfirm: 'Удалить чат «{title}»? Это нельзя отменить.',
+    hiddenAnswer: 'Ответ скрыт: документы, на которых он основан, удалены или больше вам недоступны.',
+    pastClarification: 'Уточнение из истории — чтобы выбрать вариант, задайте вопрос снова.',
   },
 
   documents: {
@@ -205,6 +213,7 @@ export const ru: Dict = {
     backup_newer: 'Копия сделана более новой версией Enclave ({version}). Сначала обновите Enclave.',
     backup_migration: 'Базу из копии не удалось обновить до этой версии Enclave.',
     instructions_too_long: 'Инструкция длиной {length} символов — помещается не больше {max}.',
+    conversation_not_found: 'Чат не найден.',
   },
 
   docsPanel: {

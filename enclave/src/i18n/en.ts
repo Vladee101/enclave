@@ -66,6 +66,14 @@ export const en = {
     send: 'Send message',
     removeScope: 'Remove {name}',
     error: '⚠️ Error: {error}',
+    tabChats: 'Chats',
+    tabDocuments: 'Documents',
+    newChat: '+ New chat',
+    noConversations: 'No chats yet.',
+    rename: 'Rename',
+    deleteConfirm: 'Delete the chat "{title}"? This cannot be undone.',
+    hiddenAnswer: 'Answer hidden: the documents it was based on have been deleted or are no longer available to you.',
+    pastClarification: 'A clarification from history — ask the question again to choose an option.',
   },
 
   documents: {
@@ -209,6 +217,7 @@ export const en = {
     backup_newer: 'This backup was made by a newer Enclave ({version}). Update Enclave first.',
     backup_migration: 'The database in the backup could not be brought up to this version of Enclave.',
     instructions_too_long: 'The instructions are {length} characters long; at most {max} fit.',
+    conversation_not_found: 'Chat not found.',
   },
 
   docsPanel: {

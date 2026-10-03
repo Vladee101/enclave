@@ -6,7 +6,7 @@
 ## What this file is
 
 A build brief for the coding agent. **The source of truth for *why* is
-`docs/adr/`** — twenty-nine accepted Architecture Decision Records (0001–0029; 0011 superseded by 0021). This file says *what
+`docs/adr/`** — thirty accepted Architecture Decision Records (0001–0030; 0011 superseded by 0021). This file says *what
 to build, in what order, and which invariants must never be broken.* When a
 decision here seems arbitrary, the matching ADR explains it. Do not contradict
 an ADR; if reality forces a change, write a new ADR that supersedes the old one
@@ -80,7 +80,10 @@ department's content — enforced in the database, not the app (ADR-0008).
    feature work — add a SECURITY DEFINER function with its own check.
 10. **`app_user` writes only what the app writes on `app_pool`** (ADR-0018):
     INSERT on `documents`, `ingestion_jobs`, `audit_log`, and UPDATE of
-    `documents.status`/`updated_at`. Everything else is read-only for it.
+    `documents.status`/`updated_at`; its own chat history (ADR-0030) —
+    INSERT / DELETE on `chats`, UPDATE of their `title` /
+    `updated_at`, INSERT on `chat_messages`, all under owner-only RLS.
+    Everything else is read-only for it.
     A new write through `app_pool` needs an explicit GRANT in the migration
     that introduces it — default privileges no longer hand out writes, and
     `rls_validation` section 9 fails if a forbidden write comes back.
@@ -212,6 +215,11 @@ implementation.
   answer, a department's for answers built on its documents — read under
   RLS in the question's transaction (`instructions::Instructions`). LoRA
   stays as an optional expert feature; don't build training for it.
+- **Chat history (ADR-0030).** Saved by the core after the answer, owner-
+  only by RLS. An answer records the documents it rests on: reading hides
+  it if any is out of the reader's reach now, and deleting a document
+  erases the answers citing it (trigger). Never show stored answer text
+  without that check (`chat::messages`).
 - **The schema is what the migrations build.** The dev database was once
   hand-built from `db/schema.sql` and still has columns no migration
   creates; code that relies on one works there and fails on every new

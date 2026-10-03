@@ -60,6 +60,9 @@ async fn main() -> anyhow::Result<()> {
         top_k: Some(top_k),
         plan: None,
         document_ids: (!scope.is_empty()).then(|| scope.clone()),
+        // prepare() only: nothing goes into the chat history.
+        conversation_id: None,
+        shown: None,
     };
     let started = std::time::Instant::now();
     let mut prepared = prepare(&pool, &llm, user_id, &query).await.map_err(|e| anyhow::anyhow!(e))?;

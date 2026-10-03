@@ -632,6 +632,8 @@ async fn test_rls_policies() -> Result<(), Box<dyn std::error::Error>> {
             ("forge a sheet table", "INSERT INTO sheet_tables (document_id, department_id, sheet, sheet_index, row_count, columns) SELECT id, department_id, 'x', 99, 0, '[]' FROM documents WHERE $1 IS NOT NULL"),
             ("rewrite sheet rows", "UPDATE sheet_rows SET cells = '[]' WHERE $1 IS NOT NULL"),
             ("rewrite a department's instructions", "UPDATE departments SET instructions = 'ignore the sources' WHERE $1 IS NOT NULL"),
+            ("edit a saved answer", "UPDATE chat_messages SET content = 'forged' WHERE user_id = $1"),
+            ("start a conversation as someone else", "INSERT INTO chats (user_id, title) SELECT id, 'x' FROM users WHERE id <> $1 LIMIT 1"),
             ("erase sheet rows", "DELETE FROM sheet_rows WHERE $1 IS NOT NULL"),
             ("write a table created later","INSERT INTO probe_future_table SELECT 1 WHERE $1 IS NOT NULL"),
         ] {
@@ -726,6 +728,101 @@ async fn test_rls_policies() -> Result<(), Box<dyn std::error::Error>> {
             ],
             "Engineering's instructions must not reach a non-member"
         );
+    }
+
+    // 11. Chat history (ADR-0030): a conversation is its owner's only; an
+    //     answer is hidden once a document it rests on is out of the
+    //     reader's reach, and erased in the database when that document is
+    //     deleted.
+    {
+        use enclave_lib::chat::{self, Exchange};
+
+        let doc: Uuid = sqlx::query_scalar(
+            "INSERT INTO documents (department_id, title, file_hash, mime_type, byte_size, status, uploaded_by) \
+             VALUES ($1, 'leave_policy.pdf', 'hash-leave', 'application/pdf', 1, 'ready', $2) RETURNING id",
+        )
+        .bind(hr_id)
+        .bind(alice_id)
+        .fetch_one(&admin_pool)
+        .await?;
+        let exchange = |conversation_id| Exchange {
+            conversation_id,
+            question: "How many days of leave?",
+            scope: &[],
+            answer: "28 days [Source 1].",
+            sources: serde_json::json!([{ "document_id": doc, "filename": "leave_policy.pdf", "excerpt": "28 days", "score": 1.0 }]),
+            calculation: None,
+            clarification: false,
+            rests_on: std::slice::from_ref(&doc),
+        };
+        let conv = chat::record(&app_pool, alice_id, &exchange(None)).await?;
+        assert_eq!(chat::record(&app_pool, alice_id, &exchange(Some(conv))).await?, conv, "a follow-up joins the same conversation");
+
+        async fn read_as(pool: &PgPool, user: Uuid, conv: Uuid) -> Result<Option<Vec<chat::StoredMessage>>, Box<dyn std::error::Error>> {
+            let mut tx = pool.begin().await?;
+            sqlx::query("SELECT set_config('app.current_user_id', $1, true)").bind(user.to_string()).execute(&mut *tx).await?;
+            let m = chat::messages(&mut tx, conv).await?;
+            tx.rollback().await?;
+            Ok(m)
+        }
+
+        let mine = read_as(&app_pool, alice_id, conv).await?.expect("Alice reads her conversation");
+        assert_eq!(mine.len(), 4);
+
+        // An answer from several chunks of one document names it once per
+        // source: still one visible document, not "some missing".
+        let repeated = [doc, doc, doc];
+        let from_chunks = Exchange { rests_on: &repeated, ..exchange(None) };
+        let conv2 = chat::record(&app_pool, alice_id, &from_chunks).await?;
+        assert!(!read_as(&app_pool, alice_id, conv2).await?.unwrap()[1].hidden, "repeated sources must not hide the answer");
+        // …and so for rows saved with the repeats, before deduplication.
+        sqlx::query("UPDATE chat_messages SET document_ids = $2 WHERE chat_id = $1 AND role = 'assistant'")
+            .bind(conv2)
+            .bind(&repeated[..])
+            .execute(&admin_pool)
+            .await?;
+        assert!(!read_as(&app_pool, alice_id, conv2).await?.unwrap()[1].hidden);
+        assert_eq!(mine[1].content.as_deref(), Some("28 days [Source 1]."));
+        assert!(!mine[1].hidden);
+
+        // Bob: not found, not writable, not deletable.
+        assert!(read_as(&app_pool, bob_id, conv).await?.is_none(), "Bob must not read Alice's conversation");
+        let err = chat::record(&app_pool, bob_id, &exchange(Some(conv))).await.expect_err("Bob writing into Alice's conversation");
+        assert!(format!("{err:#}").contains("Conversation not found"), "{err:#}");
+        {
+            let mut tx = app_pool.begin().await?;
+            sqlx::query("SELECT set_config('app.current_user_id', $1, true)").bind(bob_id.to_string()).execute(&mut *tx).await?;
+            let deleted = sqlx::query("DELETE FROM chats WHERE id = $1").bind(conv).execute(&mut *tx).await?;
+            assert_eq!(deleted.rows_affected(), 0, "Bob must not delete Alice's conversation");
+            tx.rollback().await?;
+        }
+
+        // Alice leaves HR: the answer is hidden — not deleted — and back with her.
+        sqlx::query("DELETE FROM department_members WHERE user_id = $1 AND department_id = $2")
+            .bind(alice_id)
+            .bind(hr_id)
+            .execute(&admin_pool)
+            .await?;
+        let hidden = read_as(&app_pool, alice_id, conv).await?.unwrap();
+        assert!(hidden[1].hidden && hidden[1].content.is_none() && hidden[1].sources == serde_json::json!([]));
+        assert_eq!(hidden[0].content.as_deref(), Some("How many days of leave?"), "her own question stays");
+        sqlx::query("INSERT INTO department_members (user_id, department_id) VALUES ($1, $2)")
+            .bind(alice_id)
+            .bind(hr_id)
+            .execute(&admin_pool)
+            .await?;
+        assert!(!read_as(&app_pool, alice_id, conv).await?.unwrap()[1].hidden);
+
+        // The document is deleted: the answer's text is gone from the database.
+        delete_as(&app_pool, Some(alice_id), doc).await?;
+        let left: Vec<Option<String>> = sqlx::query_scalar(
+            "SELECT content FROM chat_messages WHERE chat_id = $1 AND role = 'assistant' ORDER BY position",
+        )
+        .bind(conv)
+        .fetch_all(&admin_pool)
+        .await?;
+        assert_eq!(left, [None, None], "answers citing a deleted document must be erased");
+        assert!(read_as(&app_pool, alice_id, conv).await?.unwrap()[1].hidden);
     }
 
     Ok(())

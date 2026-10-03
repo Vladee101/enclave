@@ -32,7 +32,7 @@ Feature-complete for a single machine and shipped as a Windows installer.
   `ingest/`, `tables/` (plans + aggregates), `llm/` (sidecars, model and
   engine downloads), `db/` (pools, RLS helper, embedded PostgreSQL),
   `backup.rs`, `error.rs`.
-- Schema: `migrations/001-019`, applied at every start. `db/schema.sql` is
+- Schema: `migrations/001-020`, applied at every start. `db/schema.sql` is
   historical reference only — **the schema is what the migrations build.**
 - Frontend: `src/` — pages, `components/`, `i18n/{en,ru}.ts` (typed: a key
   missing in one fails `tsc`).

@@ -35,6 +35,8 @@ interface QueryResult {
   calculation: string | null;
   /** Set instead of an answer; `answer` then holds its question. */
   clarification: Clarification | null;
+  /** The conversation the exchange was saved in (ADR-0030). */
+  conversation_id: string | null;
 }
 
 interface StreamTokenEvent {
@@ -64,7 +66,14 @@ export function useLlmStream() {
     setStreaming(false);
   }, []);
 
-  const ask = useCallback(async (query: string, topK = 5, plan?: ChosenPlan, documentIds?: string[]) => {
+  const ask = useCallback(async (
+    query: string,
+    topK = 5,
+    plan?: ChosenPlan,
+    documentIds?: string[],
+    conversationId?: string | null,
+    shown?: string,
+  ) => {
     cancel();
     setPartial('');
     setSources([]);
@@ -85,7 +94,16 @@ export function useLlmStream() {
         requestId,
         // Identity comes from the core session; document_ids narrows the
         // search to the files chosen in the panel (RLS still decides).
-        args: { query, top_k: topK, plan: plan ?? null, document_ids: documentIds?.length ? documentIds : null },
+        args: {
+          query,
+          top_k: topK,
+          plan: plan ?? null,
+          document_ids: documentIds?.length ? documentIds : null,
+          // Saved into this conversation, or a new one (ADR-0030); `shown`
+          // is the user's message as displayed — a clarification's label.
+          conversation_id: conversationId ?? null,
+          shown: shown ?? null,
+        },
       });
 
       setSources(result.sources);

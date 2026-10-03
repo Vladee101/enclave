@@ -1199,15 +1199,17 @@ impl Computation {
 
 /// System and user messages for the answer: the computation is the only
 /// source, and its numbers are final.
-pub fn answer_messages(computation: &Computation, question: &str) -> (&'static str, String) {
-    let system = "You answer questions about the organization's documents. \
-                  The source is the exact result of a calculation the application ran over a spreadsheet. \
-                  Report its numbers exactly as written there — never recalculate, round or convert them — \
-                  and say which conditions the calculation used. Cite it as [Source 1]. \
-                  If the result is split into groups, list every group with its own number, \
-                  one per line, exactly as in the source; never merge them into one total. \
-                  If no rows matched, say so and name the conditions. \
-                  Answer once, concisely, in the language of the question.";
+pub fn answer_messages(computation: &Computation, question: &str) -> (String, String) {
+    let system = format!(
+        "You answer questions about the organization's documents. \
+         The source is the exact result of a calculation the application ran over a spreadsheet. \
+         Report its numbers exactly as written there — never recalculate, round or convert them — \
+         and say which conditions the calculation used. Cite it as [Source 1]. \
+         If the result is split into groups, list every group with its own number, \
+         one per line, exactly as in the source; never merge them into one total. \
+         If no rows matched, say so and name the conditions. Answer once, concisely. {}",
+        crate::instructions::language_rule(question)
+    );
     (
         system,
         format!(

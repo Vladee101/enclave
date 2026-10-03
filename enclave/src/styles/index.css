@@ -1008,3 +1008,36 @@ code, .mono {
 /* ── Department instructions (ADR-0029) ── */
 .instructions-row td { background: var(--bg-elevated); }
 .instructions-input { width: 100%; resize: vertical; font-family: inherit; line-height: 1.45; }
+
+/* ── Chat history (ADR-0030) ── */
+.side-tabs { display: flex; gap: 4px; padding: 2px; border-radius: 8px; background: var(--bg-elevated); }
+.side-tabs button {
+  flex: 1; border: none; background: none; padding: 6px 0; border-radius: 6px;
+  font-size: 12px; font-weight: 600; color: var(--text-secondary); cursor: pointer;
+}
+.side-tabs button.on { background: var(--bg-surface); color: var(--text-primary); box-shadow: 0 1px 2px rgba(0,0,0,0.15); }
+.conv-new { width: 100%; justify-content: center; font-size: 13px; }
+.conv-item { display: flex; align-items: center; gap: 2px; border-radius: 6px; }
+.conv-item.selected { background: var(--accent-subtle); box-shadow: inset 2px 0 0 var(--accent-primary); }
+.conv-item:hover:not(.selected) { background: var(--bg-elevated); }
+.conv-open {
+  flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  background: none; border: none; padding: 6px 8px; cursor: pointer; text-align: left; color: var(--text-primary);
+}
+.conv-open:disabled { cursor: default; }
+.conv-title { font-size: 13px; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conv-date { font-size: 11px; color: var(--text-muted); }
+.conv-action {
+  background: none; border: none; color: var(--text-muted); cursor: pointer; padding: 4px 6px;
+  opacity: 0; font-size: 13px;
+}
+.conv-item:hover .conv-action, .conv-action:focus-visible { opacity: 1; }
+.conv-action:hover:not(:disabled) { color: var(--text-accent); }
+.conv-rename { font-size: 13px; padding: 6px 8px; width: 100%; }
+.message-hidden { font-style: italic; color: var(--text-muted); }
+
+/* Source chips: one per document, with its chunks' [Source N] numbers. */
+.source-nums {
+  margin-left: 6px; padding: 0 6px; border-radius: 8px;
+  background: var(--bg-elevated); color: var(--text-muted); font-size: 11px;
+}
