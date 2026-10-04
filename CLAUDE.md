@@ -6,7 +6,7 @@
 ## What this file is
 
 A build brief for the coding agent. **The source of truth for *why* is
-`docs/adr/`** — thirty accepted Architecture Decision Records (0001–0030; 0011 superseded by 0021). This file says *what
+`docs/adr/`** — thirty accepted Architecture Decision Records (0001–0030; 0011 superseded by 0021) and one proposed (0031, office mode). This file says *what
 to build, in what order, and which invariants must never be broken.* When a
 decision here seems arbitrary, the matching ADR explains it. Do not contradict
 an ADR; if reality forces a change, write a new ADR that supersedes the old one
@@ -220,6 +220,12 @@ implementation.
   it if any is out of the reader's reach now, and deleting a document
   erases the answers citing it (trigger). Never show stored answer text
   without that check (`chat::messages`).
+- **Office mode is proposed, not built (ADR-0031).** One PC is the
+  server (database, files, worker, models), the others are clients over
+  HTTPS with no database credentials at all — a client holding
+  `app_user`'s password could set any `app.current_user_id`. Until it is
+  built, never point a second PC at the database through
+  `*_DATABASE_URL` as a shortcut.
 - **The schema is what the migrations build.** The dev database was once
   hand-built from `db/schema.sql` and still has columns no migration
   creates; code that relies on one works there and fails on every new
