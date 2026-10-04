@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { call, useAppMode } from '../api';
 import { useAuth } from '../contexts/AuthContext';
 import { useI18n, LangToggle } from '../i18n';
 import { Button } from '../components/Button';
@@ -14,6 +14,8 @@ interface UserInfo {
 export function LoginPage() {
   const { login } = useAuth();
   const { t, tError } = useI18n();
+  // On an office client profiles are made by an administrator (ADR-0031).
+  const client = useAppMode()?.mode === 'client';
   const [users,       setUsers]       = useState<UserInfo[]>([]);
   const [selectedId,  setSelectedId]  = useState<string>('');
   const [pin,         setPin]         = useState('');
@@ -24,23 +26,29 @@ export function LoginPage() {
   const [newPin,      setNewPin]      = useState('');
 
   useEffect(() => {
-    invoke<UserInfo[]>('cmd_list_users').then(setUsers).catch(console.error);
+    call<UserInfo[]>('cmd_list_users').then(setUsers).catch(console.error);
   }, []);
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
     if (!selectedId) { setError(t('login.selectProfileError')); return; }
     setLoading(true); setError('');
-    const ok = await login(selectedId, pin);
-    if (!ok) { setError(t('login.incorrectPin')); setLoading(false); }
+    try {
+      const ok = await login(selectedId, pin);
+      if (!ok) { setError(t('login.incorrectPin')); setLoading(false); }
+    } catch (err) {
+      // Too many wrong PINs, or the office server out of reach.
+      setError(tError(err));
+      setLoading(false);
+    }
   }
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true); setError('');
     try {
-      await invoke('cmd_create_user', { args: { username: newUsername, pin: newPin } });
-      const updated = await invoke<UserInfo[]>('cmd_list_users');
+      await call('cmd_create_user', { args: { username: newUsername, pin: newPin } });
+      const updated = await call<UserInfo[]>('cmd_list_users');
       setUsers(updated);
       setShowCreate(false);
       setNewUsername(''); setNewPin('');
@@ -66,7 +74,7 @@ export function LoginPage() {
               <div className="user-list">
                 {users.length === 0 && (
                   <div className="text-sm text-muted" style={{ padding: '8px 0' }}>
-                    {t('login.noProfiles')}
+                    {client ? t('login.noProfilesClient') : t('login.noProfiles')}
                   </div>
                 )}
                 {users.map(u => (
@@ -109,15 +117,21 @@ export function LoginPage() {
               {t('login.signIn')}
             </Button>
 
-            <Button
-              type="button"
-              variant="ghost"
-              fullWidth
-              style={{ justifyContent: 'center', marginTop: 8 }}
-              onClick={() => setShowCreate(true)}
-            >
-              {t('login.createNewProfile')}
-            </Button>
+            {client ? (
+              <div className="text-sm text-muted" style={{ marginTop: 10, textAlign: 'center' }}>
+                {t('login.profilesOnServer')}
+              </div>
+            ) : (
+              <Button
+                type="button"
+                variant="ghost"
+                fullWidth
+                style={{ justifyContent: 'center', marginTop: 8 }}
+                onClick={() => setShowCreate(true)}
+              >
+                {t('login.createNewProfile')}
+              </Button>
+            )}
           </form>
         ) : (
           <form onSubmit={handleCreate}>

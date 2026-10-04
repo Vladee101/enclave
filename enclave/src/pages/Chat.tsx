@@ -1,5 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { call } from '../api';
 import { useAuth } from '../contexts/AuthContext';
 import { useI18n } from '../i18n';
 import { useLlmStream, type ChosenPlan, type Clarification } from '../hooks/useLlmStream';
@@ -114,7 +114,7 @@ export function ChatPage() {
 
   const openConversation = useCallback(async (id: string) => {
     try {
-      const stored = await invoke<StoredMessage[]>('cmd_get_conversation', { conversationId: id });
+      const stored = await call<StoredMessage[]>('cmd_get_conversation', { conversationId: id });
       setMessages(stored.map(m => ({
         id: nextId.current++,
         role: m.role === 'user' ? 'user' : 'bot',

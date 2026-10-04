@@ -9,6 +9,7 @@ pub mod chat;
 pub mod session;
 pub mod error;
 pub mod instructions;
+pub mod office;
 pub mod tables;
 
 use sqlx::PgPool;
@@ -27,6 +28,20 @@ pub struct AppState {
     pub app_pool:    PgPool,
     pub admin_pool:  PgPool,
     pub ingest_pool: PgPool,
+}
+
+/// What the user-facing commands need, in one value both callers can
+/// hold: the window's commands (through Tauri state) and the office
+/// server (ADR-0031). The core functions under `commands` take it with a
+/// `Caller`; no ingestion pool here — only the worker uses that one.
+#[derive(Clone)]
+pub struct Core {
+    pub app_pool:   PgPool,
+    pub admin_pool: PgPool,
+    pub llm:        Option<llm::LlmClient>,
+    /// `{app_data}/blobs` (ADR-0013).
+    pub blob_root:  std::path::PathBuf,
+    pub logins:     std::sync::Arc<session::LoginGuard>,
 }
 
 /// The privileged role's connection string, for `pg_dump` (ADR-0026) —
@@ -55,13 +70,27 @@ pub fn run() {
         .setup(|app| {
             // Here, not before the builder: a second instance has exited by
             // now and cannot touch the running one's log file.
-            init_logging(app.path().app_data_dir().ok());
+            let app_data = app.path().app_data_dir()?;
+            init_logging(Some(app_data.clone()));
             let app_handle = app.handle().clone();
+
+            // Office mode (ADR-0031). A client runs nothing of its own —
+            // no database, no models, no worker — and forwards every
+            // command to the server.
+            let mode = office::load(&app_data)?;
+            app.manage(session::Session::default());
+            if let office::Mode::Client { server, fingerprint } = &mode {
+                app.manage(office::client::Remote::new(server, fingerprint)?);
+                app.manage(office::AppMode { mode: "client", server: Some(server.clone()), fingerprint: None, port: None });
+                info!("Enclave ready as a client of {server}.");
+                return Ok(());
+            }
 
             // Pool construction is async; block here so state is managed
             // before any command can be invoked (ADR-0008 hard invariant).
+            let slots = if matches!(mode, office::Mode::Server { .. }) { office::SERVER_SLOTS } else { 1 };
             let (app_state, llm_client, embedded_pg, urls) =
-                tauri::async_runtime::block_on(init(&app_handle)).map_err(|e| {
+                tauri::async_runtime::block_on(init(&app_handle, slots)).map_err(|e| {
                     Box::new(std::io::Error::new(
                         std::io::ErrorKind::Other,
                         format!("{e:#}"),
@@ -69,12 +98,27 @@ pub fn run() {
                 })?;
 
             let ingest_pool = app_state.ingest_pool.clone();
+            let core = Core {
+                app_pool:   app_state.app_pool.clone(),
+                admin_pool: app_state.admin_pool.clone(),
+                llm:        llm_client.clone(),
+                blob_root:  app.path().app_data_dir()?.join("blobs"),
+                logins:     Default::default(),
+            };
+            let mut app_mode = office::AppMode { mode: "single", server: None, fingerprint: None, port: None };
+            if let office::Mode::Server { port } = mode {
+                let identity = office::tls::Identity::load_or_create(&app_data.join("office"))?;
+                let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+                let running = tauri::async_runtime::block_on(office::server::start(core.clone(), &identity, addr))?;
+                app_mode = office::AppMode { mode: "server", server: None, fingerprint: Some(running.fingerprint), port: Some(port) };
+            }
+            app.manage(app_mode);
+            app.manage(core);
             app.manage(app_state);
             app.manage(llm_client);
             app.manage(embedded_pg);
             app.manage(urls);
             app.manage(commands::backup::BackupBusy::default());
-            app.manage(session::Session::default());
             app.manage(commands::models::ModelDownloads::default());
 
             let app2 = app.handle().clone();
@@ -122,6 +166,8 @@ pub fn run() {
             commands::backup::cmd_backup_restore,
             commands::backup::cmd_backup_staged,
             commands::backup::cmd_backup_cancel_restore,
+            office::cmd_app_mode,
+            office::client::cmd_remote_call,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -165,7 +211,7 @@ fn init_logging(app_data: Option<std::path::PathBuf>) {
 /// Async init: connect both pools, run migrations, start LLM sidecar.
 type Initialised = (AppState, Option<llm::LlmClient>, Option<db::embedded::EmbeddedPostgres>, DatabaseUrls);
 
-async fn init(app: &tauri::AppHandle) -> anyhow::Result<Initialised> {
+async fn init(app: &tauri::AppHandle, slots: u32) -> anyhow::Result<Initialised> {
     info!("Enclave starting up…");
 
     // Where the database is (ADR-0014): all three role URLs set — an
@@ -189,7 +235,7 @@ async fn init(app: &tauri::AppHandle) -> anyhow::Result<Initialised> {
         ),
     };
 
-    match connect(app, &embedded, &admin_url, &app_url, &ingest_url).await {
+    match connect(app, &embedded, &admin_url, &app_url, &ingest_url, slots).await {
         Ok((state, llm)) => Ok((state, llm, embedded, DatabaseUrls { admin: admin_url })),
         Err(e) => {
             // Setup failed after our server started: do not leave it running.
@@ -207,6 +253,7 @@ async fn connect(
     admin_url: &str,
     app_url: &str,
     ingest_url: &str,
+    slots: u32,
 ) -> anyhow::Result<(AppState, Option<llm::LlmClient>)> {
     // Migrations run via the privileged role; app_user has no DDL access.
     let admin_pool = db::connect_and_migrate(admin_url).await?;
@@ -238,7 +285,7 @@ async fn connect(
     // on AppState above.
     let ingest_pool = db::build_pool(ingest_url).await?;
 
-    let llm_client = match llm::LlmClient::spawn(app, &admin_pool).await {
+    let llm_client = match llm::LlmClient::spawn(app, &admin_pool, slots).await {
         Ok(client) => Some(client),
         Err(e) => {
             tracing::warn!("llama-server sidecar unavailable, continuing without inference: {e:#}");

@@ -1,6 +1,6 @@
 import type React from 'react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { call } from '../api';
 import { useI18n, type TStringKey } from '../i18n';
 
 export interface DocInfo {
@@ -74,8 +74,8 @@ export function DocumentsPanel({ onInsert, selected, onToggleSelect, onLoaded, t
     setError(null);
     try {
       const [d, t] = await Promise.all([
-        invoke<DocInfo[]>('cmd_list_documents'),
-        invoke<TableOutline[]>('cmd_list_document_tables'),
+        call<DocInfo[]>('cmd_list_documents'),
+        call<TableOutline[]>('cmd_list_document_tables'),
       ]);
       setDocs(d);
       setTables(t);

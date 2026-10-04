@@ -10,8 +10,8 @@ use crate::{
     chat::{self, ConversationInfo, StoredMessage},
     db::rls::set_current_user,
     error::AppError,
-    session::Session,
-    AppState,
+    session::{Caller, Session},
+    Core,
 };
 
 fn not_found() -> AppError {
@@ -20,11 +20,15 @@ fn not_found() -> AppError {
 
 #[tauri::command]
 pub async fn cmd_list_conversations(
-    state:   State<'_, AppState>,
+    core:    State<'_, Core>,
     session: State<'_, Session>,
 ) -> Result<Vec<ConversationInfo>, AppError> {
-    let user_id = session.require()?.id;
-    let mut tx = state.app_pool.begin().await.map_err(AppError::of)?;
+    list_conversations(&core, &session.caller()).await
+}
+
+pub async fn list_conversations(core: &Core, caller: &Caller) -> Result<Vec<ConversationInfo>, AppError> {
+    let user_id = caller.require()?.id;
+    let mut tx = core.app_pool.begin().await.map_err(AppError::of)?;
     set_current_user(&mut tx, user_id).await.map_err(AppError::of)?;
     let list = chat::list(&mut tx).await.map_err(AppError::of)?;
     tx.commit().await.map_err(AppError::of)?;
@@ -33,12 +37,16 @@ pub async fn cmd_list_conversations(
 
 #[tauri::command]
 pub async fn cmd_get_conversation(
-    state:   State<'_, AppState>,
+    core:    State<'_, Core>,
     session: State<'_, Session>,
     conversation_id: Uuid,
 ) -> Result<Vec<StoredMessage>, AppError> {
-    let user_id = session.require()?.id;
-    let mut tx = state.app_pool.begin().await.map_err(AppError::of)?;
+    get_conversation(&core, &session.caller(), conversation_id).await
+}
+
+pub async fn get_conversation(core: &Core, caller: &Caller, conversation_id: Uuid) -> Result<Vec<StoredMessage>, AppError> {
+    let user_id = caller.require()?.id;
+    let mut tx = core.app_pool.begin().await.map_err(AppError::of)?;
     set_current_user(&mut tx, user_id).await.map_err(AppError::of)?;
     let messages = chat::messages(&mut tx, conversation_id).await.map_err(|e| AppError::from_anyhow(&e))?;
     tx.commit().await.map_err(AppError::of)?;
@@ -53,13 +61,17 @@ pub struct RenameArgs {
 
 #[tauri::command]
 pub async fn cmd_rename_conversation(
-    state:   State<'_, AppState>,
+    core:    State<'_, Core>,
     session: State<'_, Session>,
-    args:    RenameArgs,
+    args: RenameArgs,
 ) -> Result<(), AppError> {
-    let user_id = session.require()?.id;
+    rename_conversation(&core, &session.caller(), args).await
+}
+
+pub async fn rename_conversation(core: &Core, caller: &Caller, args: RenameArgs) -> Result<(), AppError> {
+    let user_id = caller.require()?.id;
     let title = chat::title_of(&args.title);
-    let mut tx = state.app_pool.begin().await.map_err(AppError::of)?;
+    let mut tx = core.app_pool.begin().await.map_err(AppError::of)?;
     set_current_user(&mut tx, user_id).await.map_err(AppError::of)?;
     let done = sqlx::query("UPDATE chats SET title = $2 WHERE id = $1")
         .bind(args.conversation_id)
@@ -77,12 +89,16 @@ pub async fn cmd_rename_conversation(
 /// Delete a conversation with its messages (they cascade).
 #[tauri::command]
 pub async fn cmd_delete_conversation(
-    state:   State<'_, AppState>,
+    core:    State<'_, Core>,
     session: State<'_, Session>,
     conversation_id: Uuid,
 ) -> Result<(), AppError> {
-    let user_id = session.require()?.id;
-    let mut tx = state.app_pool.begin().await.map_err(AppError::of)?;
+    delete_conversation(&core, &session.caller(), conversation_id).await
+}
+
+pub async fn delete_conversation(core: &Core, caller: &Caller, conversation_id: Uuid) -> Result<(), AppError> {
+    let user_id = caller.require()?.id;
+    let mut tx = core.app_pool.begin().await.map_err(AppError::of)?;
     set_current_user(&mut tx, user_id).await.map_err(AppError::of)?;
     let done = sqlx::query("DELETE FROM chats WHERE id = $1")
         .bind(conversation_id)

@@ -196,7 +196,10 @@ impl LlmClient {
     /// embedding sidecar is best-effort: if it can't start (no model file
     /// yet, still on Stage 1 of setup), chat keeps working and only
     /// ingestion fails, with a clear error, until it's fixed.
-    pub async fn spawn(app: &AppHandle, pool: &PgPool) -> Result<Self> {
+    /// `slots`: questions answered at once — 1 on a desktop, more on an
+    /// office server (ADR-0031).
+    pub async fn spawn(app: &AppHandle, pool: &PgPool, slots: u32) -> Result<Self> {
+        let slots = slots.max(1);
         let base_url = "http://127.0.0.1:8080".to_string();
         let http = Client::new();
 
@@ -234,9 +237,12 @@ impl LlmClient {
             // (measured: 59k tokens over 4 slots for a 3B model — beyond its
             // 32k training context, and leaving no room for the embedding
             // server). One desktop user = one slot; 8k covers a 5-chunk
-            // prompt plus 768 generated tokens many times over.
-            "--ctx-size".into(), "8192".into(),
-            "--parallel".into(), "1".into(),
+            // prompt plus 768 generated tokens many times over. The size
+            // is split between the slots, so each gets its own 8k: an
+            // office server's three cost ~3.5 GB of KV cache for Qwen3-4B
+            // in f16 instead of ~1.2 GB (ADR-0031).
+            "--ctx-size".into(), (8192 * slots).to_string(),
+            "--parallel".into(), slots.to_string(),
             // Errors only (see LLAMA_LOG_VERBOSITY).
             "--log-verbosity".into(), LLAMA_LOG_VERBOSITY.into(),
             "--model".into(), model_path(app, "base.gguf")?,
@@ -252,7 +258,7 @@ impl LlmClient {
         wait_for_health(&http, &base_url, 120).await.context("llama-server (chat) did not become ready")?;
         info!("llama-server (chat) ready at {base_url}");
 
-        let embed_base_url = match Self::spawn_embedding_sidecar(app, &http, pool, &children).await {
+        let embed_base_url = match Self::spawn_embedding_sidecar(app, &http, pool, &children, slots).await {
             Ok(url) => Some(url),
             Err(e) => {
                 warn!(
@@ -285,18 +291,20 @@ impl LlmClient {
         http:     &Client,
         pool:     &PgPool,
         children: &Mutex<Vec<CommandChild>>,
+        slots:    u32,
     ) -> Result<String> {
         let base_url = "http://127.0.0.1:8081".to_string();
         let model = model_path(app, "embed.gguf")?;
 
+        // nomic-embed-text was trained on 2048-token inputs; chunks are 512
+        // characters, far below that. One slot per chat slot, split as there.
+        let (ctx, parallel) = ((2048 * slots).to_string(), slots.to_string());
         let args: Vec<String> = [
             "--port", "8081",
             "--embedding",
             "--n-gpu-layers", "999",
-            // nomic-embed-text was trained on 2048-token inputs; chunks
-            // are 512 characters, far below that.
-            "--ctx-size", "2048",
-            "--parallel", "1",
+            "--ctx-size", &ctx,
+            "--parallel", &parallel,
             "--log-verbosity", LLAMA_LOG_VERBOSITY,
             // A small embedding GGUF (nomic-embed-text-v1.5, ~270 MB) —
             // separate from the chat model, see the struct doc.

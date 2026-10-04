@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { call } from '../api';
 import { useI18n } from '../i18n';
 
 export interface ConversationInfo {
@@ -35,7 +35,7 @@ export function ConversationsPanel({ tabs, currentId, refreshKey, busy, onOpen, 
 
   const load = useCallback(async () => {
     try {
-      setList(await invoke<ConversationInfo[]>('cmd_list_conversations'));
+      setList(await call<ConversationInfo[]>('cmd_list_conversations'));
       setError(null);
     } catch (e) {
       setError(tError(e));
@@ -50,7 +50,7 @@ export function ConversationsPanel({ tabs, currentId, refreshKey, busy, onOpen, 
     setRenaming(null);
     if (!title) return;
     try {
-      await invoke('cmd_rename_conversation', { args: { conversation_id: renaming.id, title } });
+      await call('cmd_rename_conversation', { args: { conversation_id: renaming.id, title } });
     } catch (e) {
       setError(tError(e));
     }
@@ -60,7 +60,7 @@ export function ConversationsPanel({ tabs, currentId, refreshKey, busy, onOpen, 
   async function remove(c: ConversationInfo) {
     if (!window.confirm(t('chat.deleteConfirm', { title: c.title }))) return;
     try {
-      await invoke('cmd_delete_conversation', { conversationId: c.id });
+      await call('cmd_delete_conversation', { conversationId: c.id });
       onDeleted(c.id);
     } catch (e) {
       setError(tError(e));

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { call, useAppMode } from '../api';
 import { useAuth } from '../contexts/AuthContext';
 import { useI18n } from '../i18n';
 import { Badge } from '../components/Badge';
@@ -27,6 +27,7 @@ interface AuditEntry {
 export function AdminPage() {
   const { user } = useAuth();
   const { t, tError, tPlural, formatDateTime } = useI18n();
+  const mode = useAppMode();
   const [depts,     setDepts]     = useState<Dept[]>([]);
   const [adapters,  setAdapters]  = useState<Adapter[]>([]);
   const [newDept,   setNewDept]   = useState('');
@@ -48,7 +49,7 @@ export function AdminPage() {
     if (!editing) return;
     setError(null);
     try {
-      await invoke('cmd_set_department_instructions', {
+      await call('cmd_set_department_instructions', {
         args: { department_id: editing.id, instructions: editing.text },
       });
       setEditing(null);
@@ -61,11 +62,11 @@ export function AdminPage() {
   async function load() {
     if (!user) return;
     const [d, a, u, m, log] = await Promise.all([
-      invoke<Dept[]>('cmd_list_departments'),
-      invoke<Adapter[]>('cmd_list_adapters'),
-      invoke<UserRow[]>('cmd_list_users'),
-      invoke<Membership[]>('cmd_list_memberships'),
-      invoke<AuditEntry[]>('cmd_list_audit', { limit: 100 }),
+      call<Dept[]>('cmd_list_departments'),
+      call<Adapter[]>('cmd_list_adapters'),
+      call<UserRow[]>('cmd_list_users'),
+      call<Membership[]>('cmd_list_memberships'),
+      call<AuditEntry[]>('cmd_list_audit', { limit: 100 }),
     ]);
     setDepts(d);
     setAdapters(a);
@@ -92,7 +93,7 @@ export function AdminPage() {
     )) return;
     setError(null);
     try {
-      await invoke('cmd_delete_department', { departmentId: d.id });
+      await call('cmd_delete_department', { departmentId: d.id });
     } catch (e) {
       setError(tError(e));
     }
@@ -103,7 +104,7 @@ export function AdminPage() {
     e.preventDefault();
     if (!user) return;
     setSaving(true);
-    await invoke('cmd_create_department', {
+    await call('cmd_create_department', {
       args: { name: newDept },
     }).catch(e => setError(tError(e)));
     setNewDept('');
@@ -115,7 +116,7 @@ export function AdminPage() {
     e.preventDefault();
     if (!user) return;
     setSaving(true);
-    await invoke('cmd_add_member', {
+    await call('cmd_add_member', {
       args: memberForm,
     }).catch(e => setError(tError(e)));
     await load();
@@ -124,7 +125,7 @@ export function AdminPage() {
 
   async function removeMember(m: Membership) {
     if (!user) return;
-    await invoke('cmd_remove_member', {
+    await call('cmd_remove_member', {
       args: { user_id: m.user_id, department_id: m.department_id },
     }).catch(e => setError(tError(e)));
     await load();
@@ -134,7 +135,7 @@ export function AdminPage() {
     e.preventDefault();
     if (!user) return;
     setSaving(true);
-    await invoke('cmd_add_adapter', {
+    await call('cmd_add_adapter', {
       args: {
         department_id: adapterForm.department_id,
         adapter_path:  adapterForm.adapter_path,
@@ -344,7 +345,8 @@ export function AdminPage() {
           </table>
         )}
 
-        <form onSubmit={addAdapter} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: 10 }}>
+        {/* An adapter is a file on the server's disk: registered there, not from a client. */}
+        {mode?.mode !== 'client' && <form onSubmit={addAdapter} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: 10 }}>
           <FormField label={t('admin.department')} htmlFor="adapter-dept" style={{ marginBottom: 0 }}>
             <select
               id="adapter-dept"
@@ -385,11 +387,23 @@ export function AdminPage() {
               </Button>
             </div>
           </FormField>
-        </form>
+        </form>}
       </div>
 
-      {/* ── Backup ── */}
-      <BackupCard />
+      {/* ── Office server (ADR-0031) ── */}
+      {mode?.mode === 'server' && (
+        <div className="card">
+          <div style={{ fontWeight: 600, fontSize: 15 }}>{t('admin.officeServer')}</div>
+          <div className="text-sm text-muted" style={{ marginTop: 2, marginBottom: 10 }}>
+            {t('admin.officeServerDesc', { port: String(mode.port ?? '') })}
+          </div>
+          <div className="text-sm">{t('admin.officeFingerprint')}</div>
+          <code className="mono" style={{ fontSize: 12, wordBreak: 'break-all' }}>{mode.fingerprint}</code>
+        </div>
+      )}
+
+      {/* ── Backup: of the server's data, made on the server ── */}
+      {mode?.mode !== 'client' && <BackupCard />}
 
       {/* ── Audit log ── */}
       <div className="card">

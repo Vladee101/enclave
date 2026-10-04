@@ -9,9 +9,9 @@ use tauri::State;
 use uuid::Uuid;
 
 use crate::{
-    AppState,
+    Core,
     audit::{self, event},
-    session::{Session, SessionUser},
+    session::{Caller, Session, SessionUser},
 };
 
 #[derive(Serialize, Deserialize, FromRow, Clone, Debug)]
@@ -39,9 +39,13 @@ fn verify_pin(pin: &str, stored_hash: &str) -> bool {
 /// List all local user profiles (used by the login screen profile picker).
 /// Uses admin_pool: app_user has no current_user_id context at this stage.
 #[tauri::command]
-pub async fn cmd_list_users(state: State<'_, AppState>) -> Result<Vec<UserInfo>, AppError> {
+pub async fn cmd_list_users(core: State<'_, Core>) -> Result<Vec<UserInfo>, AppError> {
+    list_users(&core).await
+}
+
+pub async fn list_users(core: &Core) -> Result<Vec<UserInfo>, AppError> {
     sqlx::query_as::<_, UserInfo>("SELECT id, username, is_admin FROM users ORDER BY username")
-        .fetch_all(&state.admin_pool)
+        .fetch_all(&core.admin_pool)
         .await
         .map_err(AppError::of)
 }
@@ -56,13 +60,17 @@ pub struct CreateUserArgs {
 
 #[tauri::command]
 pub async fn cmd_create_user(
-    state:   State<'_, AppState>,
+    core:    State<'_, Core>,
     session: State<'_, Session>,
     args:    CreateUserArgs,
 ) -> Result<UserInfo, AppError> {
+    create_user(&core, &session.caller(), args).await
+}
+
+pub async fn create_user(core: &Core, caller: &Caller, args: CreateUserArgs) -> Result<UserInfo, AppError> {
     let pin_hash = hash_pin(&args.pin)?;
 
-    let mut tx = state.admin_pool.begin().await.map_err(AppError::of)?;
+    let mut tx = core.admin_pool.begin().await.map_err(AppError::of)?;
 
     // Bootstrap: whoever creates a profile while no admin exists yet becomes
     // the admin (CLAUDE.md task 11). Deliberately "no admin exists" rather
@@ -114,7 +122,7 @@ pub async fn cmd_create_user(
 
     // Profiles are created from the login screen, usually with nobody
     // signed in — then the new user is recorded as creating themselves.
-    let actor = session.get().map(|u| u.id).unwrap_or(user.id);
+    let actor = caller.get().map(|u| u.id).unwrap_or(user.id);
     audit::record(
         &mut tx,
         Some(actor),
@@ -138,7 +146,7 @@ pub struct LoginArgs {
     pub pin:     String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct LoginResult {
     pub ok:       bool,
     pub user_id:  Option<Uuid>,
@@ -146,64 +154,85 @@ pub struct LoginResult {
     pub is_admin: Option<bool>,
 }
 
+impl LoginResult {
+    pub fn of(user: Option<&SessionUser>) -> Self {
+        match user {
+            Some(u) => Self { ok: true, user_id: Some(u.id), username: Some(u.username.clone()), is_admin: Some(u.is_admin) },
+            None => Self { ok: false, user_id: None, username: None, is_admin: None },
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn cmd_login(
-    state:   State<'_, AppState>,
+    core:    State<'_, Core>,
     session: State<'_, Session>,
     args:    LoginArgs,
 ) -> Result<LoginResult, AppError> {
+    // A failed attempt on any profile ends the previous session: the
+    // screen is being handed to someone else.
+    session.clear();
+    let user = login(&core, &args, "window").await?;
+    if let Some(u) = &user {
+        session.set(u.clone());
+    }
+    Ok(LoginResult::of(user.as_ref()))
+}
+
+/// Check a PIN: the user on success, `None` on a wrong PIN or an unknown
+/// profile. `from` names where the attempt came from — "window", or the
+/// client's address on the office server — for the attempt limit
+/// (`LoginGuard`, ADR-0031), which counts per profile and per origin.
+pub async fn login(core: &Core, args: &LoginArgs, from: &str) -> Result<Option<SessionUser>, AppError> {
+    let keys = [format!("user:{}", args.user_id), format!("from:{from}")];
+    core.logins.check(&keys, std::time::Instant::now())?;
+
     let row = sqlx::query(
         "SELECT id, username, password_hash, is_admin FROM users WHERE id = $1",
     )
     .bind(args.user_id)
-    .fetch_optional(&state.admin_pool)
+    .fetch_optional(&core.admin_pool)
     .await
     .map_err(AppError::of)?;
 
-    let empty = LoginResult { ok: false, user_id: None, username: None, is_admin: None };
-
-    // A failed attempt on any profile ends the previous session: the
-    // screen is being handed to someone else.
-    session.clear();
-
     let Some(r) = row else {
-        return Ok(empty);
+        core.logins.failed(&keys, std::time::Instant::now());
+        return Ok(None);
     };
 
     let stored: String = r.get("password_hash");
     if !verify_pin(&args.pin, &stored) {
-        record_on_admin_pool(&state, Some(args.user_id), event::LOGIN_FAILED).await?;
-        return Ok(empty);
+        core.logins.failed(&keys, std::time::Instant::now());
+        record_on_admin_pool(core, Some(args.user_id), event::LOGIN_FAILED, serde_json::json!({ "from": from })).await?;
+        return Ok(None);
     }
+    core.logins.succeeded(&keys);
 
     let user = SessionUser {
         id:       r.get("id"),
         username: r.get("username"),
         is_admin: r.get("is_admin"),
     };
-    record_on_admin_pool(&state, Some(user.id), event::LOGIN).await?;
-    session.set(user.clone());
-
-    Ok(LoginResult {
-        ok:       true,
-        user_id:  Some(user.id),
-        username: Some(user.username),
-        is_admin: Some(user.is_admin),
-    })
+    record_on_admin_pool(core, Some(user.id), event::LOGIN, serde_json::json!({ "from": from })).await?;
+    Ok(Some(user))
 }
 
 /// End the session in the core. Every user-scoped command fails with
 /// "Not signed in." from here until the next successful `cmd_login`.
 #[tauri::command]
 pub async fn cmd_logout(
-    state:   State<'_, AppState>,
+    core:    State<'_, Core>,
     session: State<'_, Session>,
 ) -> Result<(), AppError> {
     if let Some(user) = session.get() {
-        record_on_admin_pool(&state, Some(user.id), event::LOGOUT).await?;
+        logout(&core, &user).await?;
     }
     session.clear();
     Ok(())
+}
+
+pub async fn logout(core: &Core, user: &SessionUser) -> Result<(), AppError> {
+    record_on_admin_pool(core, Some(user.id), event::LOGOUT, serde_json::json!({})).await
 }
 
 /// Who the core considers signed in. The frontend restores its state from
@@ -216,9 +245,9 @@ pub async fn cmd_current_session(session: State<'_, Session>) -> Result<Option<S
 
 /// Login/logout run before or after a user context exists, so their audit
 /// rows go through admin_pool — the same pool that verifies the PIN.
-async fn record_on_admin_pool(state: &State<'_, AppState>, user_id: Option<Uuid>, event_type: &str) -> Result<(), AppError> {
-    let mut conn = state.admin_pool.acquire().await.map_err(AppError::of)?;
-    audit::record(&mut conn, user_id, None, event_type, serde_json::json!({}))
+async fn record_on_admin_pool(core: &Core, user_id: Option<Uuid>, event_type: &str, payload: serde_json::Value) -> Result<(), AppError> {
+    let mut conn = core.admin_pool.acquire().await.map_err(AppError::of)?;
+    audit::record(&mut conn, user_id, None, event_type, payload)
         .await
         .map_err(AppError::of)
 }

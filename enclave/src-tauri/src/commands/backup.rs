@@ -15,7 +15,7 @@ use crate::{
     commands::admin::require_admin,
     db::embedded::{self, EmbeddedPostgres},
     session::Session,
-    AppState, DatabaseUrls,
+    Core, DatabaseUrls,
 };
 
 /// Set while a backup or a restore runs: one at a time.
@@ -105,21 +105,21 @@ fn embedded_pg<'a>(pg: &'a State<'_, Option<EmbeddedPostgres>>) -> Result<&'a Em
 #[tauri::command]
 pub async fn cmd_backup_create(
     app:     AppHandle,
-    state:   State<'_, AppState>,
+    core:    State<'_, Core>,
     session: State<'_, Session>,
     urls:    State<'_, DatabaseUrls>,
     busy:    State<'_, BackupBusy>,
     path:    String,
 ) -> Result<BackupSummary, AppError> {
-    let user_id = require_admin(&state, &session).await?;
+    let user_id = require_admin(&core, &session.caller()).await?;
     let _running = Running::start(&busy.0)?;
     let bin = embedded::tools_dir(&app).map_err(|e| AppError::from_anyhow(&e))?;
     let out = PathBuf::from(&path);
-    let manifest = backup::create(&state.admin_pool, &bin, &urls.admin, &app_data(&app)?.join("blobs"), &out, progress(&app))
+    let manifest = backup::create(&core.admin_pool, &bin, &urls.admin, &app_data(&app)?.join("blobs"), &out, progress(&app))
         .await
         .map_err(|e| AppError::from_anyhow(&e))?;
 
-    let mut conn = state.admin_pool.acquire().await.map_err(AppError::of)?;
+    let mut conn = core.admin_pool.acquire().await.map_err(AppError::of)?;
     let file = out.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
     audit::record(
         &mut conn,
@@ -143,11 +143,11 @@ pub async fn cmd_backup_create(
 /// that is not a backup this build can restore.
 #[tauri::command]
 pub async fn cmd_backup_inspect(
-    state:   State<'_, AppState>,
+    core:    State<'_, Core>,
     session: State<'_, Session>,
     path:    String,
 ) -> Result<BackupSummary, AppError> {
-    require_admin(&state, &session).await?;
+    require_admin(&core, &session.caller()).await?;
     let manifest = tauri::async_runtime::spawn_blocking(move || backup::read_manifest(&PathBuf::from(path)))
         .await
         .map_err(AppError::of)?
@@ -159,16 +159,16 @@ pub async fn cmd_backup_inspect(
 #[tauri::command]
 pub async fn cmd_backup_restore(
     app:     AppHandle,
-    state:   State<'_, AppState>,
+    core:    State<'_, Core>,
     session: State<'_, Session>,
     pg:      State<'_, Option<EmbeddedPostgres>>,
     busy:    State<'_, BackupBusy>,
     path:    String,
 ) -> Result<StagedSummary, AppError> {
-    require_admin(&state, &session).await?;
+    require_admin(&core, &session.caller()).await?;
     let pg = embedded_pg(&pg)?;
     let _running = Running::start(&busy.0)?;
-    let username = session.require()?.username;
+    let username = session.caller().require()?.username;
     let staged = backup::stage(&pg.cluster(), &app_data(&app)?, &PathBuf::from(path), &username, progress(&app))
         .await
         .map_err(|e| AppError::from_anyhow(&e))?;
@@ -179,10 +179,10 @@ pub async fn cmd_backup_restore(
 #[tauri::command]
 pub async fn cmd_backup_staged(
     app:     AppHandle,
-    state:   State<'_, AppState>,
+    core:    State<'_, Core>,
     session: State<'_, Session>,
 ) -> Result<Option<StagedSummary>, AppError> {
-    require_admin(&state, &session).await?;
+    require_admin(&core, &session.caller()).await?;
     let staged = backup::staged(&app_data(&app)?).map_err(|e| AppError::from_anyhow(&e))?;
     Ok(staged.as_ref().map(Into::into))
 }
@@ -191,12 +191,12 @@ pub async fn cmd_backup_staged(
 #[tauri::command]
 pub async fn cmd_backup_cancel_restore(
     app:     AppHandle,
-    state:   State<'_, AppState>,
+    core:    State<'_, Core>,
     session: State<'_, Session>,
     pg:      State<'_, Option<EmbeddedPostgres>>,
     busy:    State<'_, BackupBusy>,
 ) -> Result<(), AppError> {
-    require_admin(&state, &session).await?;
+    require_admin(&core, &session.caller()).await?;
     let pg = embedded_pg(&pg)?;
     let _running = Running::start(&busy.0)?;
     backup::discard_staged(&pg.cluster(), &app_data(&app)?).await.map_err(|e| AppError::from_anyhow(&e))

@@ -220,12 +220,20 @@ implementation.
   it if any is out of the reader's reach now, and deleting a document
   erases the answers citing it (trigger). Never show stored answer text
   without that check (`chat::messages`).
-- **Office mode is proposed, not built (ADR-0031).** One PC is the
+- **Office mode (ADR-0031, proposed, being built).** One PC is the
   server (database, files, worker, models), the others are clients over
   HTTPS with no database credentials at all — a client holding
-  `app_user`'s password could set any `app.current_user_id`. Until it is
-  built, never point a second PC at the database through
-  `*_DATABASE_URL` as a shortcut.
+  `app_user`'s password could set any `app.current_user_id`. Never point
+  a second PC at the database through `*_DATABASE_URL` as a shortcut.
+  Built so far: `{app_data}/office.json` picks the mode; every user-facing
+  command is a core function `x(core: &Core, caller: &Caller, …)` behind a
+  thin `cmd_x` wrapper, so the window and `office::server::dispatch` run
+  the same code — a new command needs both, or is deliberately local;
+  the caller comes from the window's `Session` or a server token, never
+  from arguments. The UI calls `call()` from `src/api.ts`, never
+  `invoke` directly (except local-only screens: models, backups).
+  `tests/office_server.rs` is the proof, like `rls_validation`.
+  Pairing by code and the installer's mode choice are still to come.
 - **The schema is what the migrations build.** The dev database was once
   hand-built from `db/schema.sql` and still has columns no migration
   creates; code that relies on one works there and fails on every new

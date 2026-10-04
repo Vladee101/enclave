@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { call } from '../api';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 interface SourceRef {
@@ -90,7 +90,7 @@ export function useLlmStream() {
         event => setPartial(prev => prev + event.payload.token),
       );
 
-      const result = await invoke<QueryResult>('cmd_query_stream', {
+      const result = await call<QueryResult>('cmd_query_stream', {
         requestId,
         // Identity comes from the core session; document_ids narrows the
         // search to the files chosen in the panel (RLS still decides).

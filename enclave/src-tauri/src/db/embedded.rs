@@ -163,7 +163,7 @@ fn free_port() -> Result<u16> {
 /// DPAPI, current-user scope: only this Windows account on this machine can
 /// decrypt the file.
 #[cfg(windows)]
-mod protect {
+pub(crate) mod protect {
     use anyhow::{bail, Result};
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Cryptography::{
@@ -203,7 +203,7 @@ mod protect {
 /// Elsewhere (the app ships for Windows only so far, ADR-0014) the file is
 /// stored as is, readable by its owner only.
 #[cfg(not(windows))]
-mod protect {
+pub(crate) mod protect {
     pub fn seal(data: &[u8]) -> anyhow::Result<Vec<u8>> {
         Ok(data.to_vec())
     }

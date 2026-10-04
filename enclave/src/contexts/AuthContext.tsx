@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useCallback, useEffect, ReactNode } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { call } from '../api';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -33,7 +33,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    invoke<User | null>('cmd_current_session')
+    call<User | null>('cmd_current_session')
       .then(setUser)
       .catch(console.error)
       .finally(() => setReady(true));
@@ -41,7 +41,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(async (userId: string, pin: string): Promise<boolean> => {
     type LoginResult = { ok: boolean; user_id: string | null; username: string | null; is_admin: boolean | null };
-    const res = await invoke<LoginResult>('cmd_login', { args: { user_id: userId, pin } });
+    const res = await call<LoginResult>('cmd_login', { args: { user_id: userId, pin } });
     if (res.ok && res.user_id && res.username) {
       setUser({ id: res.user_id, username: res.username, is_admin: res.is_admin ?? false });
       return true;
@@ -51,7 +51,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const logout = useCallback(async () => {
-    await invoke('cmd_logout').catch(console.error);
+    await call('cmd_logout').catch(console.error);
     setUser(null);
   }, []);
 

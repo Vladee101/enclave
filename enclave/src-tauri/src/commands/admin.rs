@@ -2,15 +2,15 @@ use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::FromRow;
-use tauri::{AppHandle, State};
+use tauri::State;
 use uuid::Uuid;
 
 use crate::{
-    AppState,
+    Core,
     audit::{self, event},
     commands::documents::remove_blob,
     db::rls::set_current_user,
-    session::Session,
+    session::{Caller, Session},
 };
 
 #[derive(Serialize, FromRow, Debug)]
@@ -75,11 +75,11 @@ fn slugify(name: &str) -> String {
 /// command must call it before doing anything else. The flag is read from
 /// the database on every call, not from the session, so a demotion applies
 /// immediately.
-pub(crate) async fn require_admin(state: &State<'_, AppState>, session: &State<'_, Session>) -> Result<Uuid, AppError> {
-    let user_id = session.require()?.id;
+pub(crate) async fn require_admin(core: &Core, caller: &Caller) -> Result<Uuid, AppError> {
+    let user_id = caller.require()?.id;
     let is_admin: Option<bool> = sqlx::query_scalar("SELECT is_admin FROM users WHERE id = $1")
         .bind(user_id)
-        .fetch_optional(&state.admin_pool)
+        .fetch_optional(&core.admin_pool)
         .await
         .map_err(AppError::of)?;
 
@@ -107,10 +107,14 @@ pub struct AdminDepartmentInfo {
 /// (e.g. the upload picker) should use.
 #[tauri::command]
 pub async fn cmd_list_departments(
-    state:   State<'_, AppState>,
+    core:    State<'_, Core>,
     session: State<'_, Session>,
 ) -> Result<Vec<AdminDepartmentInfo>, AppError> {
-    require_admin(&state, &session).await?;
+    list_departments(&core, &session.caller()).await
+}
+
+pub async fn list_departments(core: &Core, caller: &Caller) -> Result<Vec<AdminDepartmentInfo>, AppError> {
+    require_admin(core, caller).await?;
     sqlx::query_as::<_, AdminDepartmentInfo>(
         r#"
         SELECT d.id, d.name, d.is_default, d.instructions,
@@ -121,7 +125,7 @@ pub async fn cmd_list_departments(
         ORDER BY d.is_default DESC, d.name
         "#,
     )
-    .fetch_all(&state.admin_pool)
+    .fetch_all(&core.admin_pool)
     .await
     .map_err(AppError::of)
 }
@@ -137,13 +141,16 @@ pub async fn cmd_list_departments(
 /// transaction; blob files no live document uses are removed after COMMIT.
 #[tauri::command]
 pub async fn cmd_delete_department(
-    app:           AppHandle,
-    state:         State<'_, AppState>,
-    session:       State<'_, Session>,
+    core:    State<'_, Core>,
+    session: State<'_, Session>,
     department_id: Uuid,
 ) -> Result<(), AppError> {
-    let user_id = session.require()?.id;
-    let mut tx = state.app_pool.begin().await.map_err(AppError::of)?;
+    delete_department(&core, &session.caller(), department_id).await
+}
+
+pub async fn delete_department(core: &Core, caller: &Caller, department_id: Uuid) -> Result<(), AppError> {
+    let user_id = caller.require()?.id;
+    let mut tx = core.app_pool.begin().await.map_err(AppError::of)?;
     set_current_user(&mut tx, user_id).await.map_err(AppError::of)?;
 
     let (document_ids, orphaned_blobs): (Vec<Uuid>, Vec<String>) =
@@ -173,7 +180,7 @@ pub async fn cmd_delete_department(
     tx.commit().await.map_err(AppError::of)?;
 
     for hash in &orphaned_blobs {
-        remove_blob(&app, hash).await;
+        remove_blob(&core.blob_root, hash).await;
     }
     Ok(())
 }
@@ -184,15 +191,19 @@ pub async fn cmd_delete_department(
 /// or target departments they aren't a member of.
 #[tauri::command]
 pub async fn cmd_list_my_departments(
-    state:   State<'_, AppState>,
+    core:    State<'_, Core>,
     session: State<'_, Session>,
 ) -> Result<Vec<DepartmentInfo>, AppError> {
-    let user_id = session.require()?.id;
+    list_my_departments(&core, &session.caller()).await
+}
+
+pub async fn list_my_departments(core: &Core, caller: &Caller) -> Result<Vec<DepartmentInfo>, AppError> {
+    let user_id = caller.require()?.id;
 
     // Must be one explicit transaction: set_config(..., true) is
     // transaction-local, so setting it on a bare acquired connection with no
     // BEGIN reverts before the SELECT below ever runs (CLAUDE.md invariant #2).
-    let mut tx = state.app_pool.begin().await.map_err(AppError::of)?;
+    let mut tx = core.app_pool.begin().await.map_err(AppError::of)?;
     set_current_user(&mut tx, user_id).await.map_err(AppError::of)?;
 
     let depts = sqlx::query_as::<_, DepartmentInfo>(
@@ -219,11 +230,15 @@ pub struct SetInstructionsArgs {
 /// changed whose and its length.
 #[tauri::command]
 pub async fn cmd_set_department_instructions(
-    state:   State<'_, AppState>,
+    core:    State<'_, Core>,
     session: State<'_, Session>,
-    args:    SetInstructionsArgs,
+    args: SetInstructionsArgs,
 ) -> Result<(), AppError> {
-    let user_id = require_admin(&state, &session).await?;
+    set_department_instructions(&core, &session.caller(), args).await
+}
+
+pub async fn set_department_instructions(core: &Core, caller: &Caller, args: SetInstructionsArgs) -> Result<(), AppError> {
+    let user_id = require_admin(core, caller).await?;
     let text = args.instructions.trim();
     let length = text.chars().count();
     if length > crate::instructions::MAX_CHARS {
@@ -235,7 +250,7 @@ pub async fn cmd_set_department_instructions(
         .with("max", crate::instructions::MAX_CHARS));
     }
 
-    let mut tx = state.admin_pool.begin().await.map_err(AppError::of)?;
+    let mut tx = core.admin_pool.begin().await.map_err(AppError::of)?;
     let updated = sqlx::query("UPDATE departments SET instructions = NULLIF($2, '') WHERE id = $1 AND deleted_at IS NULL")
         .bind(args.department_id)
         .bind(text)
@@ -265,13 +280,17 @@ pub struct CreateDeptArgs {
 
 #[tauri::command]
 pub async fn cmd_create_department(
-    state:   State<'_, AppState>,
+    core:    State<'_, Core>,
     session: State<'_, Session>,
-    args:    CreateDeptArgs,
+    args: CreateDeptArgs,
 ) -> Result<DepartmentInfo, AppError> {
-    let admin_id = require_admin(&state, &session).await?;
+    create_department(&core, &session.caller(), args).await
+}
 
-    let mut tx = state.admin_pool.begin().await.map_err(AppError::of)?;
+pub async fn create_department(core: &Core, caller: &Caller, args: CreateDeptArgs) -> Result<DepartmentInfo, AppError> {
+    let admin_id = require_admin(core, caller).await?;
+
+    let mut tx = core.admin_pool.begin().await.map_err(AppError::of)?;
     let dept = sqlx::query_as::<_, DepartmentInfo>(
         "INSERT INTO departments (name, slug) VALUES ($1, $2) RETURNING id, name, is_default",
     )
@@ -302,10 +321,14 @@ pub struct MembershipInfo {
 /// List every membership in the org. Admin-only.
 #[tauri::command]
 pub async fn cmd_list_memberships(
-    state:   State<'_, AppState>,
+    core:    State<'_, Core>,
     session: State<'_, Session>,
 ) -> Result<Vec<MembershipInfo>, AppError> {
-    require_admin(&state, &session).await?;
+    list_memberships(&core, &session.caller()).await
+}
+
+pub async fn list_memberships(core: &Core, caller: &Caller) -> Result<Vec<MembershipInfo>, AppError> {
+    require_admin(core, caller).await?;
     sqlx::query_as::<_, MembershipInfo>(
         r#"
         SELECT u.id AS user_id, u.username, d.id AS department_id, d.name AS department_name
@@ -315,7 +338,7 @@ pub async fn cmd_list_memberships(
         ORDER BY d.name, u.username
         "#,
     )
-    .fetch_all(&state.admin_pool)
+    .fetch_all(&core.admin_pool)
     .await
     .map_err(AppError::of)
 }
@@ -333,13 +356,17 @@ pub struct MembershipArgs {
 
 #[tauri::command]
 pub async fn cmd_add_member(
-    state:   State<'_, AppState>,
+    core:    State<'_, Core>,
     session: State<'_, Session>,
-    args:    MembershipArgs,
+    args: MembershipArgs,
 ) -> Result<(), AppError> {
-    let admin_id = require_admin(&state, &session).await?;
+    add_member(&core, &session.caller(), args).await
+}
 
-    let mut tx = state.admin_pool.begin().await.map_err(AppError::of)?;
+pub async fn add_member(core: &Core, caller: &Caller, args: MembershipArgs) -> Result<(), AppError> {
+    let admin_id = require_admin(core, caller).await?;
+
+    let mut tx = core.admin_pool.begin().await.map_err(AppError::of)?;
     let added = sqlx::query(
         r#"
         INSERT INTO department_members (user_id, department_id)
@@ -367,13 +394,17 @@ pub async fn cmd_add_member(
 
 #[tauri::command]
 pub async fn cmd_remove_member(
-    state:   State<'_, AppState>,
+    core:    State<'_, Core>,
     session: State<'_, Session>,
-    args:    MembershipArgs,
+    args: MembershipArgs,
 ) -> Result<(), AppError> {
-    let admin_id = require_admin(&state, &session).await?;
+    remove_member(&core, &session.caller(), args).await
+}
 
-    let mut tx = state.admin_pool.begin().await.map_err(AppError::of)?;
+pub async fn remove_member(core: &Core, caller: &Caller, args: MembershipArgs) -> Result<(), AppError> {
+    let admin_id = require_admin(core, caller).await?;
+
+    let mut tx = core.admin_pool.begin().await.map_err(AppError::of)?;
     let removed = sqlx::query("DELETE FROM department_members WHERE user_id = $1 AND department_id = $2")
         .bind(args.user_id)
         .bind(args.department_id)
@@ -396,10 +427,14 @@ pub async fn cmd_remove_member(
 /// org-wide (not scoped to the caller's departments).
 #[tauri::command]
 pub async fn cmd_list_adapters(
-    state:   State<'_, AppState>,
+    core:    State<'_, Core>,
     session: State<'_, Session>,
 ) -> Result<Vec<AdapterInfo>, AppError> {
-    require_admin(&state, &session).await?;
+    list_adapters(&core, &session.caller()).await
+}
+
+pub async fn list_adapters(core: &Core, caller: &Caller) -> Result<Vec<AdapterInfo>, AppError> {
+    require_admin(core, caller).await?;
     sqlx::query_as::<_, AdapterInfo>(
         r#"
         SELECT da.id, da.department_id, a.file_path AS adapter_path, da.scale, a.is_active
@@ -408,7 +443,7 @@ pub async fn cmd_list_adapters(
         ORDER BY a.created_at, da.id
         "#,
     )
-    .fetch_all(&state.admin_pool)
+    .fetch_all(&core.admin_pool)
     .await
     .map_err(AppError::of)
 }
@@ -442,11 +477,15 @@ pub struct AddAdapterArgs {
 
 #[tauri::command]
 pub async fn cmd_add_adapter(
-    state:   State<'_, AppState>,
+    core:    State<'_, Core>,
     session: State<'_, Session>,
-    args:    AddAdapterArgs,
+    args: AddAdapterArgs,
 ) -> Result<AdapterInfo, AppError> {
-    let admin_id = require_admin(&state, &session).await?;
+    add_adapter(&core, &session.caller(), args).await
+}
+
+pub async fn add_adapter(core: &Core, caller: &Caller, args: AddAdapterArgs) -> Result<AdapterInfo, AppError> {
+    let admin_id = require_admin(core, caller).await?;
 
     // Content-addressed like documents: hash the actual file if it's
     // already on disk. An admin may register an adapter assignment before
@@ -458,7 +497,7 @@ pub async fn cmd_add_adapter(
     };
     let name = adapter_name_from_path(&args.adapter_path, &file_hash);
 
-    let mut tx = state.admin_pool.begin().await.map_err(AppError::of)?;
+    let mut tx = core.admin_pool.begin().await.map_err(AppError::of)?;
 
     let adapter_id: Uuid = sqlx::query_scalar(
         r#"
@@ -534,11 +573,15 @@ pub struct AuditEntry {
 /// else a non-admin reads, not a WHERE clause in this function.
 #[tauri::command]
 pub async fn cmd_list_audit(
-    state:   State<'_, AppState>,
+    core:    State<'_, Core>,
     session: State<'_, Session>,
-    limit:   Option<i64>,
+    limit: Option<i64>,
 ) -> Result<Vec<AuditEntry>, AppError> {
-    let user_id = session.require()?.id;
+    list_audit(&core, &session.caller(), limit).await
+}
+
+pub async fn list_audit(core: &Core, caller: &Caller, limit: Option<i64>) -> Result<Vec<AuditEntry>, AppError> {
+    let user_id = caller.require()?.id;
     let limit = limit.unwrap_or(200).clamp(1, 1000);
 
     // LEFT JOINs: on the RLS path a department the user has since left
@@ -552,15 +595,15 @@ pub async fn cmd_list_audit(
         LIMIT $1
     "#;
 
-    if require_admin(&state, &session).await.is_ok() {
+    if require_admin(core, caller).await.is_ok() {
         return sqlx::query_as::<_, AuditEntry>(sql)
             .bind(limit)
-            .fetch_all(&state.admin_pool)
+            .fetch_all(&core.admin_pool)
             .await
             .map_err(AppError::of);
     }
 
-    let mut tx = state.app_pool.begin().await.map_err(AppError::of)?;
+    let mut tx = core.app_pool.begin().await.map_err(AppError::of)?;
     set_current_user(&mut tx, user_id).await.map_err(AppError::of)?;
     let rows = sqlx::query_as::<_, AuditEntry>(sql)
         .bind(limit)

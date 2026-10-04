@@ -6,6 +6,7 @@ import { ChatPage }      from './pages/Chat';
 import { DocumentsPage } from './pages/Documents';
 import { AdminPage }     from './pages/Admin';
 import { ModelSetup }    from './components/ModelSetup';
+import { useAppMode }    from './api';
 import './styles/index.css';
 
 type Page = 'chat' | 'documents' | 'admin';
@@ -103,12 +104,14 @@ function AppShell() {
 
 export default function App() {
   const { user, ready } = useAuth();
-  if (!ready) return null; // asking the core who is signed in; avoids a login-screen flash
+  const mode = useAppMode();
+  if (!ready || !mode) return null; // asking the core who is signed in; avoids a login-screen flash
   return (
     <>
       {user ? <AppShell /> : <LoginPage />}
-      {/* Over any screen, login included: on first run nobody is signed in yet. */}
-      <ModelSetup />
+      {/* Over any screen, login included: on first run nobody is signed in yet.
+          A client has no models of its own — the server answers (ADR-0031). */}
+      {mode.mode !== 'client' && <ModelSetup />}
     </>
   );
 }

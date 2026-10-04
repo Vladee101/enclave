@@ -6,10 +6,10 @@ use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
 use crate::{
-    AppState,
+    Core,
     audit::{self, event},
     db::rls::set_current_user,
-    session::Session,
+    session::{Caller, Session},
     llm::{adapters::adapters_for_user, CompletionRequest, EmbedKind, LlmClient},
     retrieval,
     tables::plan,
@@ -468,18 +468,21 @@ fn require_llm(llm: &Option<LlmClient>) -> Result<&LlmClient, AppError> {
 /// Main RAG + LoRA query pipeline (ADR-0004, 0006), non-streaming.
 #[tauri::command]
 pub async fn cmd_query(
-    state:   State<'_, AppState>,
+    core:    State<'_, Core>,
     session: State<'_, Session>,
-    llm:     State<'_, Option<LlmClient>>,
-    args:    QueryArgs,
+    args: QueryArgs,
 ) -> Result<QueryResult, AppError> {
-    let user_id = session.require()?.id;
-    let llm = require_llm(&llm)?;
+    query(&core, &session.caller(), args).await
+}
+
+pub async fn query(core: &Core, caller: &Caller, args: QueryArgs) -> Result<QueryResult, AppError> {
+    let user_id = caller.require()?.id;
+    let llm = require_llm(&core.llm)?;
     let Prepared { prompt, answer, lora, sources, calculation, clarification, rests_on, .. } =
-        prepare(&state.app_pool, llm, user_id, &args).await?;
+        prepare(&core.app_pool, llm, user_id, &args).await?;
     if let Some(answer) = answer {
         let conversation_id =
-            remember(&state.app_pool, user_id, &args, &answer, &sources, calculation.as_deref(), clarification.is_some(), &rests_on).await;
+            remember(&core.app_pool, user_id, &args, &answer, &sources, calculation.as_deref(), clarification.is_some(), &rests_on).await;
         return Ok(QueryResult { answer, sources, calculation, clarification, conversation_id });
     }
 
@@ -493,7 +496,7 @@ pub async fn cmd_query(
     };
     let answer = llm.complete(&req).await.map_err(AppError::of)?;
     let conversation_id =
-        remember(&state.app_pool, user_id, &args, &answer, &sources, calculation.as_deref(), false, &rests_on).await;
+        remember(&core.app_pool, user_id, &args, &answer, &sources, calculation.as_deref(), false, &rests_on).await;
     Ok(QueryResult { answer, sources, calculation, clarification: None, conversation_id })
 }
 
@@ -508,22 +511,36 @@ struct StreamToken {
 #[tauri::command]
 pub async fn cmd_query_stream(
     app:        AppHandle,
-    state:      State<'_, AppState>,
+    core:       State<'_, Core>,
     session:    State<'_, Session>,
-    llm:        State<'_, Option<LlmClient>>,
     request_id: String,
     args:       QueryArgs,
 ) -> Result<QueryResult, AppError> {
-    let user_id = session.require()?.id;
-    let llm = require_llm(&llm)?;
-    let Prepared { prompt, answer, lora, sources, calculation, clarification, rests_on, .. } =
-        prepare(&state.app_pool, llm, user_id, &args).await?;
     let event_name = format!("llm-token:{request_id}");
+    query_stream(&core, &session.caller(), args, |token| {
+        let _ = app.emit(&event_name, StreamToken { token: token.to_string() });
+    })
+    .await
+}
+
+/// The streaming pipeline, each piece of the answer handed to `on_token`:
+/// a window event here, a server-sent event on the office server
+/// (ADR-0031).
+pub async fn query_stream(
+    core:     &Core,
+    caller:   &Caller,
+    args:     QueryArgs,
+    on_token: impl Fn(&str),
+) -> Result<QueryResult, AppError> {
+    let user_id = caller.require()?.id;
+    let llm = require_llm(&core.llm)?;
+    let Prepared { prompt, answer, lora, sources, calculation, clarification, rests_on, .. } =
+        prepare(&core.app_pool, llm, user_id, &args).await?;
     if let Some(answer) = answer {
         // Delivered the way a stream is, in one piece.
-        let _ = app.emit(&event_name, StreamToken { token: answer.clone() });
+        on_token(&answer);
         let conversation_id =
-            remember(&state.app_pool, user_id, &args, &answer, &sources, calculation.as_deref(), clarification.is_some(), &rests_on).await;
+            remember(&core.app_pool, user_id, &args, &answer, &sources, calculation.as_deref(), clarification.is_some(), &rests_on).await;
         return Ok(QueryResult { answer, sources, calculation, clarification, conversation_id });
     }
 
@@ -536,14 +553,9 @@ pub async fn cmd_query_stream(
         json_schema: None,
     };
 
-    let answer = llm
-        .complete_stream(&req, |token| {
-            let _ = app.emit(&event_name, StreamToken { token: token.to_string() });
-        })
-        .await
-        .map_err(AppError::of)?;
+    let answer = llm.complete_stream(&req, |token| on_token(token)).await.map_err(AppError::of)?;
     let conversation_id =
-        remember(&state.app_pool, user_id, &args, &answer, &sources, calculation.as_deref(), false, &rests_on).await;
+        remember(&core.app_pool, user_id, &args, &answer, &sources, calculation.as_deref(), false, &rests_on).await;
     Ok(QueryResult { answer, sources, calculation, clarification: None, conversation_id })
 }
 

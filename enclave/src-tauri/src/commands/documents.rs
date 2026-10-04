@@ -2,14 +2,15 @@ use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Digest};
 use sqlx::FromRow;
-use tauri::{AppHandle, Manager, State};
+use std::path::Path;
+use tauri::State;
 use uuid::Uuid;
 
 use crate::{
-    AppState,
+    Core,
     audit::{self, event},
     db::rls::set_current_user,
-    session::Session,
+    session::{Caller, Session},
 };
 
 #[derive(Serialize, FromRow, Debug)]
@@ -52,12 +53,15 @@ pub struct UploadArgs {
 
 #[tauri::command]
 pub async fn cmd_upload_document(
-    app:     AppHandle,
-    state:   State<'_, AppState>,
+    core:    State<'_, Core>,
     session: State<'_, Session>,
-    args:    UploadArgs,
+    args: UploadArgs,
 ) -> Result<JobStatus, AppError> {
-    let user_id = session.require()?.id;
+    upload_document(&core, &session.caller(), args).await
+}
+
+pub async fn upload_document(core: &Core, caller: &Caller, args: UploadArgs) -> Result<JobStatus, AppError> {
+    let user_id = caller.require()?.id;
     // Refuse what ingestion cannot read before anything is stored: an
     // immediate error beats a job that fails a minute later (ADR-0019).
     crate::ingest::extract::check_supported(&args.filename).map_err(AppError::of)?;
@@ -69,13 +73,13 @@ pub async fn cmd_upload_document(
     // Content-addressed blob store (CLAUDE.md): {data_dir}/blobs/{file_hash}.
     // Write before the DB insert so the ingestion worker never sees a
     // documents row pointing at bytes that aren't on disk yet.
-    let blob_dir = app.path().app_data_dir().map_err(AppError::of)?.join("blobs");
-    tokio::fs::create_dir_all(&blob_dir).await.map_err(AppError::of)?;
+    let blob_dir = &core.blob_root;
+    tokio::fs::create_dir_all(blob_dir).await.map_err(AppError::of)?;
     tokio::fs::write(blob_dir.join(&file_hash), &args.file_contents)
         .await
         .map_err(AppError::of)?;
 
-    let mut tx = state.app_pool.begin().await.map_err(AppError::of)?;
+    let mut tx = core.app_pool.begin().await.map_err(AppError::of)?;
     set_current_user(&mut tx, user_id).await.map_err(AppError::of)?;
 
     // ON CONFLICT rather than a pre-check: two concurrent uploads of the same
@@ -190,11 +194,15 @@ pub async fn cmd_upload_document(
 /// the setting is still in effect for the SELECT below (CLAUDE.md invariant #2).
 #[tauri::command]
 pub async fn cmd_list_documents(
-    state:   State<'_, AppState>,
+    core:    State<'_, Core>,
     session: State<'_, Session>,
 ) -> Result<Vec<DocumentInfo>, AppError> {
-    let user_id = session.require()?.id;
-    let mut tx = state.app_pool.begin().await.map_err(AppError::of)?;
+    list_documents(&core, &session.caller()).await
+}
+
+pub async fn list_documents(core: &Core, caller: &Caller) -> Result<Vec<DocumentInfo>, AppError> {
+    let user_id = caller.require()?.id;
+    let mut tx = core.app_pool.begin().await.map_err(AppError::of)?;
     set_current_user(&mut tx, user_id).await.map_err(AppError::of)?;
 
     let docs = sqlx::query_as::<_, DocumentInfo>(
@@ -239,11 +247,15 @@ pub struct ColumnOutline {
 /// are cell contents, and a column list has no reason to carry them.
 #[tauri::command]
 pub async fn cmd_list_document_tables(
-    state:   State<'_, AppState>,
+    core:    State<'_, Core>,
     session: State<'_, Session>,
 ) -> Result<Vec<TableOutline>, AppError> {
-    let user_id = session.require()?.id;
-    let mut tx = state.app_pool.begin().await.map_err(AppError::of)?;
+    list_document_tables(&core, &session.caller()).await
+}
+
+pub async fn list_document_tables(core: &Core, caller: &Caller) -> Result<Vec<TableOutline>, AppError> {
+    let user_id = caller.require()?.id;
+    let mut tx = core.app_pool.begin().await.map_err(AppError::of)?;
     set_current_user(&mut tx, user_id).await.map_err(AppError::of)?;
 
     let rows: Vec<(Uuid, String, i32, serde_json::Value)> = sqlx::query_as(
@@ -284,13 +296,16 @@ pub async fn cmd_list_document_tables(
 /// deletion must not leave a document whose bytes are gone.
 #[tauri::command]
 pub async fn cmd_delete_document(
-    app:         AppHandle,
-    state:       State<'_, AppState>,
-    session:     State<'_, Session>,
+    core:    State<'_, Core>,
+    session: State<'_, Session>,
     document_id: Uuid,
 ) -> Result<(), AppError> {
-    let user_id = session.require()?.id;
-    let mut tx = state.app_pool.begin().await.map_err(AppError::of)?;
+    delete_document(&core, &session.caller(), document_id).await
+}
+
+pub async fn delete_document(core: &Core, caller: &Caller, document_id: Uuid) -> Result<(), AppError> {
+    let user_id = caller.require()?.id;
+    let mut tx = core.app_pool.begin().await.map_err(AppError::of)?;
     set_current_user(&mut tx, user_id).await.map_err(AppError::of)?;
 
     let (file_hash, department_id, blob_still_used): (String, Uuid, bool) =
@@ -320,7 +335,7 @@ pub async fn cmd_delete_document(
     tx.commit().await.map_err(AppError::of)?;
 
     if !blob_still_used {
-        remove_blob(&app, &file_hash).await;
+        remove_blob(&core.blob_root, &file_hash).await;
     }
     Ok(())
 }
@@ -330,14 +345,8 @@ pub async fn cmd_delete_document(
 /// Best effort: the deletion already happened, and a leftover file is an
 /// orphan nothing reads (ADR-0013 — orphans are not collected), not a
 /// reason to report the deletion as failed.
-pub(crate) async fn remove_blob(app: &AppHandle, file_hash: &str) {
-    let blob = match app.path().app_data_dir() {
-        Ok(dir) => dir.join("blobs").join(file_hash),
-        Err(e) => {
-            tracing::warn!("Blob {file_hash} stays: no app data dir: {e}");
-            return;
-        }
-    };
+pub(crate) async fn remove_blob(blob_root: &Path, file_hash: &str) {
+    let blob = blob_root.join(file_hash);
     match tokio::fs::remove_file(&blob).await {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -353,12 +362,16 @@ pub(crate) async fn remove_blob(app: &AppHandle, file_hash: &str) {
 /// always returns `None`, and the frontend poller never terminates.
 #[tauri::command]
 pub async fn cmd_get_job_status(
-    state:   State<'_, AppState>,
+    core:    State<'_, Core>,
     session: State<'_, Session>,
-    job_id:  Uuid,
+    job_id: Uuid,
 ) -> Result<Option<JobStatus>, AppError> {
-    let user_id = session.require()?.id;
-    let mut tx = state.app_pool.begin().await.map_err(AppError::of)?;
+    get_job_status(&core, &session.caller(), job_id).await
+}
+
+pub async fn get_job_status(core: &Core, caller: &Caller, job_id: Uuid) -> Result<Option<JobStatus>, AppError> {
+    let user_id = caller.require()?.id;
+    let mut tx = core.app_pool.begin().await.map_err(AppError::of)?;
     set_current_user(&mut tx, user_id).await.map_err(AppError::of)?;
 
     let job = sqlx::query_as::<_, JobStatus>(

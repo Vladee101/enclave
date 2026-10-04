@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { call } from '../api';
 import { useAuth } from '../contexts/AuthContext';
 import { useI18n, type TFunc } from '../i18n';
 import { useJobPoller } from '../hooks/useJobPoller';
@@ -96,8 +96,8 @@ export function DocumentsPage() {
 
   useEffect(() => {
     if (!user) return;
-    invoke<DocInfo[]>('cmd_list_documents').then(setDocs).catch(console.error);
-    invoke<Dept[]>('cmd_list_my_departments').then(d => {
+    call<DocInfo[]>('cmd_list_documents').then(setDocs).catch(console.error);
+    call<Dept[]>('cmd_list_my_departments').then(d => {
       setDepts(d);
       setDeptId(defaultTarget(d));
     }).catch(console.error);
@@ -124,7 +124,7 @@ export function DocumentsPage() {
     try {
       const buf = await file.arrayBuffer();
       const file_contents = Array.from(new Uint8Array(buf));
-      const job = await invoke<JobStatus>('cmd_upload_document', {
+      const job = await call<JobStatus>('cmd_upload_document', {
         args: {
           department_id: deptId,
           filename:      file.name,
@@ -156,7 +156,7 @@ export function DocumentsPage() {
     if (!window.confirm(t('documents.deleteConfirmTitle', { name: doc.filename }) + '\n\n' + t('documents.deleteConfirmBody'))) return;
     setError(null);
     try {
-      await invoke('cmd_delete_document', { documentId: doc.id });
+      await call('cmd_delete_document', { documentId: doc.id });
       setDocs(prev => prev.filter(d => d.id !== doc.id));
     } catch (e) {
       setError(tError(e));

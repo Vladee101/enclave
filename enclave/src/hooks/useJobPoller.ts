@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { call } from '../api';
 
 interface JobStatus {
   job_id:      string;
@@ -24,7 +24,7 @@ export function useJobPoller(intervalMs = 1500) {
     const id = setInterval(async () => {
       try {
         // The core scopes this to the signed-in user (session + RLS).
-        const status = await invoke<JobStatus | null>('cmd_get_job_status', { jobId });
+        const status = await call<JobStatus | null>('cmd_get_job_status', { jobId });
         if (!status) return; // no job row yet; try again next tick
         setJobs(prev => ({ ...prev, [jobId]: status }));
         if (status.status === 'succeeded' || status.status === 'failed') {
