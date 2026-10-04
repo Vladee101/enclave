@@ -1,5 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
-import { call } from '../api';
+import { call, useAppMode } from '../api';
 import { useAuth } from '../contexts/AuthContext';
 import { useI18n } from '../i18n';
 import { useLlmStream, type ChosenPlan, type Clarification } from '../hooks/useLlmStream';
@@ -88,6 +88,8 @@ type ScopeDoc = Pick<DocInfo, 'id' | 'filename'>;
 export function ChatPage() {
   const { user } = useAuth();
   const { t, tError } = useI18n();
+  // On an office client questions go to the office server (ADR-0031).
+  const mode = useAppMode();
   const { partial, sources, calculation, clarification, streaming, ask } = useLlmStream();
   const [messages, setMessages]   = useState<Message[]>([]);
   const [input,    setInput]      = useState('');
@@ -308,7 +310,7 @@ export function ChatPage() {
             <div style={{ fontSize: 48 }}>🔒</div>
             <div style={{ fontSize: 18, fontWeight: 600 }}>{t('chat.emptyTitle')}</div>
             <div style={{ fontSize: 14, color: 'var(--text-secondary)' }}>
-              {t('chat.emptySubtitle')}
+              {mode?.mode === 'client' ? t('chat.emptySubtitleOffice') : t('chat.emptySubtitle')}
             </div>
           </div>
         )}

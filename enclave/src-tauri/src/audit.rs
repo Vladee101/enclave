@@ -19,6 +19,9 @@ pub mod event {
     pub const BACKUP_CREATED:     &str = "backup_created";
     pub const DEPARTMENT_INSTRUCTIONS_CHANGED: &str = "department_instructions_changed";
     pub const BACKUP_RESTORED:    &str = "backup_restored";
+    pub const OFFICE_MODE_CHANGED:     &str = "office_mode_changed";
+    pub const OFFICE_INVITE_CREATED:   &str = "office_invite_created";
+    pub const OFFICE_COMPUTER_PAIRED:  &str = "office_computer_paired";
 }
 
 /// Append one row to `audit_log` (FR14).

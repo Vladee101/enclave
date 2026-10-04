@@ -106,10 +106,13 @@ pub fn run() {
                 logins:     Default::default(),
             };
             let mut app_mode = office::AppMode { mode: "single", server: None, fingerprint: None, port: None };
+            let invitations = std::sync::Arc::new(office::pairing::Invitations::default());
+            app.manage(invitations.clone());
             if let office::Mode::Server { port } = mode {
                 let identity = office::tls::Identity::load_or_create(&app_data.join("office"))?;
                 let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-                let running = tauri::async_runtime::block_on(office::server::start(core.clone(), &identity, addr))?;
+                let running =
+                    tauri::async_runtime::block_on(office::server::start(core.clone(), &identity, invitations, addr))?;
                 app_mode = office::AppMode { mode: "server", server: None, fingerprint: Some(running.fingerprint), port: Some(port) };
             }
             app.manage(app_mode);
@@ -168,6 +171,9 @@ pub fn run() {
             commands::backup::cmd_backup_cancel_restore,
             office::cmd_app_mode,
             office::client::cmd_remote_call,
+            office::cmd_office_invite,
+            office::cmd_office_pair,
+            office::cmd_office_set_mode,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

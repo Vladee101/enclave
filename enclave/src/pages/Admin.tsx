@@ -7,6 +7,7 @@ import { Button } from '../components/Button';
 import { FormField } from '../components/FormField';
 import { ErrorText } from '../components/ErrorText';
 import { BackupCard } from '../components/BackupCard';
+import { OfficeServerCard } from '../components/OfficeServerCard';
 
 interface Dept    { id: string; name: string; is_default: boolean; member_count: number; document_count: number; instructions: string | null; }
 
@@ -391,16 +392,7 @@ export function AdminPage() {
       </div>
 
       {/* ── Office server (ADR-0031) ── */}
-      {mode?.mode === 'server' && (
-        <div className="card">
-          <div style={{ fontWeight: 600, fontSize: 15 }}>{t('admin.officeServer')}</div>
-          <div className="text-sm text-muted" style={{ marginTop: 2, marginBottom: 10 }}>
-            {t('admin.officeServerDesc', { port: String(mode.port ?? '') })}
-          </div>
-          <div className="text-sm">{t('admin.officeFingerprint')}</div>
-          <code className="mono" style={{ fontSize: 12, wordBreak: 'break-all' }}>{mode.fingerprint}</code>
-        </div>
-      )}
+      {mode && mode.mode !== 'client' && <OfficeServerCard mode={mode} />}
 
       {/* ── Backup: of the server's data, made on the server ── */}
       {mode?.mode !== 'client' && <BackupCard />}

@@ -69,6 +69,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
 tokio-stream = "0.1"
 tower = { version = "0.5", features = ["util"] }
+hmac = "0.12"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }

@@ -17,7 +17,12 @@
 
 use enclave_lib::{
     commands::auth::{self, CreateUserArgs},
-    office::{client::Remote, server, tls::Identity},
+    office::{
+        client::{self, Remote},
+        pairing::{self, Invitations},
+        server,
+        tls::Identity,
+    },
     session::{Caller, FREE_FAILURES},
     Core,
 };
@@ -107,7 +112,8 @@ async fn office_server_keeps_each_client_to_its_own_user() -> Result<(), Box<dyn
         .bind(alice.id).fetch_one(&admin_pool).await?;
 
     let identity = Identity::generate()?;
-    let running = server::start(core.clone(), &identity, "127.0.0.1:0".parse()?).await?;
+    let invitations = std::sync::Arc::new(Invitations::default());
+    let running = server::start(core.clone(), &identity, invitations.clone(), "127.0.0.1:0".parse()?).await?;
     let address = format!("https://127.0.0.1:{}", running.addr.port());
 
     // 1. No token: the login screen's list, nothing else.
@@ -172,7 +178,48 @@ async fn office_server_keeps_each_client_to_its_own_user() -> Result<(), Box<dyn
     let e = misled.call("cmd_list_users", &json!({})).await.unwrap_err();
     assert_eq!(code(&e), "server_identity_changed");
 
-    // 7. Wrong PINs: free up to the limit, then paused — the right PIN too.
+    // 7. Connecting a computer by the administrator's code (pairing).
+    let here = format!("127.0.0.1:{}", running.addr.port());
+    let now = std::time::Instant::now;
+    let invite = invitations.create(boss.id, now());
+    let typed = pairing::display(&invite).to_lowercase(); // as read out and typed
+    let (url, pinned) = client::pair(&here, &typed).await.expect("the right code pairs");
+    assert_eq!((url.as_str(), pinned.as_str()), (address.as_str(), running.fingerprint.as_str()));
+    let e = client::pair(&here, &typed).await.unwrap_err();
+    assert_eq!(code(&e), "invitation_expired", "a code connects one computer");
+
+    invitations.create(boss.id, now());
+    let e = client::pair(&here, &pairing::generate_code()).await.unwrap_err();
+    assert_eq!(code(&e), "pairing_failed");
+
+    // An impostor at another address, with its own certificate, the same
+    // build, and happy to accept any confirmation: only the client's check
+    // of the server's proof stands between it and a pinned client. It
+    // does not know the code, so its proof fails, and the real invitation
+    // still works afterwards.
+    let impostor = axum::Router::new()
+        .route("/api/v1/hello", axum::routing::get(|| async { axum::Json(enclave_lib::office::Hello::this_build()) }))
+        .route(
+            "/api/v1/pair/proof",
+            axum::routing::post(|| async { axum::Json(json!({ "mac": "00".repeat(32) })) }),
+        )
+        .route("/api/v1/pair/confirm", axum::routing::post(|| async { axum::Json(json!(null)) }));
+    let fake = server::serve(impostor, &Identity::generate()?, "127.0.0.1:0".parse()?).await?;
+    let real = invitations.create(boss.id, now());
+    let e = client::pair(&format!("127.0.0.1:{}", fake.addr.port()), &real).await.unwrap_err();
+    assert_eq!(code(&e), "pairing_failed");
+    let (_, pinned) = client::pair(&here, &real).await.expect("the real server still pairs");
+    assert_eq!(pinned, running.fingerprint);
+    fake.task.abort();
+    let paired: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_log WHERE event_type = 'office_computer_paired' AND user_id = $1",
+    )
+    .bind(boss.id)
+    .fetch_one(&admin_pool)
+    .await?;
+    assert_eq!(paired, 2);
+
+    // 8. Wrong PINs: free up to the limit, then paused — the right PIN too.
     let guesser = Remote::new(&address, &running.fingerprint)?;
     for _ in 0..FREE_FAILURES {
         assert_eq!(sign_in(&guesser, alice.id, "0000").await["ok"], false);

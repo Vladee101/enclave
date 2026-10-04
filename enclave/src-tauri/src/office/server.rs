@@ -8,6 +8,8 @@
 //!   window passes them to `invoke`.
 //! - `POST /api/v1/query` — a question, answered as server-sent events:
 //!   `token` pieces, then one `result` or `error`.
+//! - `POST /api/v1/pair/proof`, `/pair/confirm` — connecting a computer by
+//!   the administrator's one-time code (`pairing`).
 //!
 //! The caller is whoever the bearer token was issued to, never anything
 //! in the request body: the same rule as the window's `Session`, and the
@@ -37,7 +39,7 @@ use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tracing::{info, warn};
 
-use super::{tls::Identity, Hello};
+use super::{pairing::Invitations, tls::Identity, Hello};
 use crate::{
     commands::{admin, auth, chat, documents, query},
     error::AppError,
@@ -97,8 +99,10 @@ impl Tokens {
 
 #[derive(Clone)]
 struct Ctx {
-    core:   Core,
-    tokens: Arc<Tokens>,
+    core:        Core,
+    tokens:      Arc<Tokens>,
+    invitations: Arc<Invitations>,
+    fingerprint: String,
 }
 
 /// A started server: where it listens and its certificate's fingerprint.
@@ -110,11 +114,19 @@ pub struct Running {
 
 /// Listen on `addr` (port 0 picks a free one, for tests) and serve until
 /// the task is dropped with the runtime.
-pub async fn start(core: Core, identity: &Identity, addr: SocketAddr) -> Result<Running> {
+pub async fn start(core: Core, identity: &Identity, invitations: Arc<Invitations>, addr: SocketAddr) -> Result<Running> {
+    let router = router(Ctx { core, tokens: Arc::default(), invitations, fingerprint: identity.fingerprint() });
+    let running = serve(router, identity, addr).await?;
+    info!("Office server listening on {}, certificate {}", running.addr, running.fingerprint);
+    Ok(running)
+}
+
+/// Serve `router` over TLS with `identity`'s certificate. Public for the
+/// tests, which stand up impostor servers with it.
+pub async fn serve(router: Router, identity: &Identity, addr: SocketAddr) -> Result<Running> {
     let acceptor = TlsAcceptor::from(Arc::new(identity.server_config()?));
     let listener = TcpListener::bind(addr).await.with_context(|| format!("listening on {addr}"))?;
     let addr = listener.local_addr()?;
-    let router = router(Ctx { core, tokens: Arc::default() });
     let task = tokio::spawn(async move {
         loop {
             let (tcp, peer) = match listener.accept().await {
@@ -150,7 +162,6 @@ pub async fn start(core: Core, identity: &Identity, addr: SocketAddr) -> Result<
             });
         }
     });
-    info!("Office server listening on {addr}, certificate {}", identity.fingerprint());
     Ok(Running { addr, fingerprint: identity.fingerprint(), task })
 }
 
@@ -161,6 +172,8 @@ fn router(ctx: Ctx) -> Router {
         .route("/api/v1/logout", post(logout))
         .route("/api/v1/call/{cmd}", post(call))
         .route("/api/v1/query", post(ask))
+        .route("/api/v1/pair/proof", post(pair_proof))
+        .route("/api/v1/pair/confirm", post(pair_confirm))
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .with_state(ctx)
 }
@@ -179,6 +192,7 @@ impl IntoResponse for Failure {
             "not_signed_in" => StatusCode::UNAUTHORIZED,
             "admin_required" | "document_delete_forbidden" => StatusCode::FORBIDDEN,
             "login_throttled" => StatusCode::TOO_MANY_REQUESTS,
+            "invitation_expired" => StatusCode::GONE,
             "unknown_command" => StatusCode::NOT_FOUND,
             "internal" => StatusCode::INTERNAL_SERVER_ERROR,
             _ => StatusCode::UNPROCESSABLE_ENTITY,
@@ -311,6 +325,44 @@ async fn ask(State(ctx): State<Ctx>, headers: HeaderMap, Json(a): Json<Value>) -
     let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx);
     use tokio_stream::StreamExt;
     Ok(Sse::new(stream.map(Ok::<_, Infallible>)).into_response())
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct PairRequest {
+    pub nonce: String,
+    /// The client's proof, on confirmation.
+    #[serde(default)]
+    pub mac:   Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct PairProof {
+    pub mac: String,
+}
+
+async fn pair_proof(State(ctx): State<Ctx>, Json(req): Json<PairRequest>) -> Result<Json<PairProof>, Failure> {
+    Ok(Json(PairProof { mac: ctx.invitations.proof(&ctx.fingerprint, &req.nonce, Instant::now())? }))
+}
+
+async fn pair_confirm(
+    State(ctx): State<Ctx>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(req): Json<PairRequest>,
+) -> Result<Json<()>, Failure> {
+    let mac = req.mac.as_deref().unwrap_or_default();
+    let invited_by = ctx.invitations.confirm(&ctx.fingerprint, &req.nonce, mac, Instant::now())?;
+    let mut conn = ctx.core.admin_pool.acquire().await.map_err(AppError::of)?;
+    crate::audit::record(
+        &mut conn,
+        Some(invited_by),
+        None,
+        crate::audit::event::OFFICE_COMPUTER_PAIRED,
+        serde_json::json!({ "from": peer.ip().to_string() }),
+    )
+    .await
+    .map_err(AppError::of)?;
+    info!("Computer {} connected to the office server", peer.ip());
+    Ok(Json(()))
 }
 
 fn event(name: &str, data: &impl Serialize) -> Event {

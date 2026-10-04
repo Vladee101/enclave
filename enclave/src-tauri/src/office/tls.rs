@@ -14,7 +14,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, Serve
 use rustls::{DigitallySignedStruct, SignatureScheme};
 use sha2::{Digest, Sha256};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::db::embedded::protect;
 
@@ -75,15 +75,34 @@ pub fn fingerprint(cert: &[u8]) -> String {
 
 /// A TLS client that accepts only the certificate with this fingerprint.
 pub fn pinned_client_config(fingerprint: &str) -> rustls::ClientConfig {
+    client_config(Expect::Pin(fingerprint.to_lowercase()))
+}
+
+/// For pairing only (`pairing`): a TLS client that accepts the first
+/// certificate it is shown and records its fingerprint — then only that
+/// one. Trust comes afterwards, from the code's proof over this
+/// fingerprint; nothing is sent before that but a nonce.
+pub fn capturing_client_config() -> (rustls::ClientConfig, Arc<Mutex<Option<String>>>) {
+    let seen = Arc::new(Mutex::new(None));
+    (client_config(Expect::First(seen.clone())), seen)
+}
+
+fn client_config(expect: Expect) -> rustls::ClientConfig {
     let provider = Arc::new(ring::default_provider());
     let mut config = rustls::ClientConfig::builder_with_provider(provider.clone())
         .with_safe_default_protocol_versions()
         .expect("ring supports the default protocol versions")
         .dangerous()
-        .with_custom_certificate_verifier(Arc::new(Pinned { fingerprint: fingerprint.to_lowercase(), provider }))
+        .with_custom_certificate_verifier(Arc::new(Pinned { expect, provider }))
         .with_no_client_auth();
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
     config
+}
+
+#[derive(Debug)]
+enum Expect {
+    Pin(String),
+    First(Arc<Mutex<Option<String>>>),
 }
 
 /// The pin. The name is not checked — the client reaches the server by
@@ -92,8 +111,8 @@ pub fn pinned_client_config(fingerprint: &str) -> rustls::ClientConfig {
 /// presenting the certificate proves nothing without its key.
 #[derive(Debug)]
 struct Pinned {
-    fingerprint: String,
-    provider:    Arc<CryptoProvider>,
+    expect:   Expect,
+    provider: Arc<CryptoProvider>,
 }
 
 impl ServerCertVerifier for Pinned {
@@ -105,7 +124,15 @@ impl ServerCertVerifier for Pinned {
         _ocsp_response: &[u8],
         _now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        if fingerprint(end_entity) == self.fingerprint {
+        let got = fingerprint(end_entity);
+        let ok = match &self.expect {
+            Expect::Pin(pinned) => got == *pinned,
+            Expect::First(seen) => {
+                let mut seen = seen.lock().unwrap_or_else(|e| e.into_inner());
+                seen.get_or_insert_with(|| got.clone()) == &got
+            }
+        };
+        if ok {
             Ok(ServerCertVerified::assertion())
         } else {
             Err(rustls::Error::General(IDENTITY_CHANGED.into()))

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useI18n, LangToggle } from '../i18n';
+import { useAppMode } from '../api';
 
 interface ModelStatus {
   key:     string;
@@ -25,6 +26,7 @@ interface Done     { ok: boolean; error: string | null; }
  */
 export function ModelSetup() {
   const { t, tError, formatSize } = useI18n();
+  const single = useAppMode()?.mode === 'single';
   const gb = (bytes: number) => formatSize(bytes, 'GB');
   const itemLabel = (m: ModelStatus) => {
     switch (m.key) {
@@ -129,6 +131,8 @@ export function ModelSetup() {
           ) : (
             <>
               <p>{t('modelSetup.downloadDesc', { size: gb(total) })}</p>
+              {/* A computer that will work with the office server needs none of this (ADR-0031). */}
+              {single && <p className="text-sm text-muted">{t('office.noModelsOnClient')}</p>}
               {pending.map(m => {
                 const done = progress[m.key] ?? m.partial;
                 const pct = Math.min(100, Math.round((done / m.size) * 100));

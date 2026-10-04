@@ -1041,3 +1041,16 @@ code, .mono {
   margin-left: 6px; padding: 0 6px; border-radius: 8px;
   background: var(--bg-elevated); color: var(--text-muted); font-size: 11px;
 }
+
+/* Office server (ADR-0031): the one-time code to read out. */
+.office-invite {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 12px 14px; border-radius: 10px; background: var(--bg-elevated);
+}
+.office-invite-row { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.office-invite-row > span { min-width: 120px; }
+.office-code { font-size: 20px; letter-spacing: 2px; font-weight: 600; }
+.link-button {
+  background: none; border: none; padding: 0; cursor: pointer;
+  color: var(--accent-glow); font: inherit; text-decoration: underline;
+}

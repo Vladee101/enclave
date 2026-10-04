@@ -233,7 +233,10 @@ implementation.
   from arguments. The UI calls `call()` from `src/api.ts`, never
   `invoke` directly (except local-only screens: models, backups).
   `tests/office_server.rs` is the proof, like `rls_validation`.
-  Pairing by code and the installer's mode choice are still to come.
+  Pairing: `office/pairing.rs` — the code is only ever an HMAC key, and the
+  client checks the server's proof before pinning (the impostor case in
+  `office_server` fails without it). The installer's mode choice is
+  still to come.
 - **The schema is what the migrations build.** The dev database was once
   hand-built from `db/schema.sql` and still has columns no migration
   creates; code that relies on one works there and fails on every new

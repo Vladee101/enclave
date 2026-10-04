@@ -5,6 +5,8 @@ import { useI18n, LangToggle } from '../i18n';
 import { Button } from '../components/Button';
 import { FormField } from '../components/FormField';
 import { ErrorText } from '../components/ErrorText';
+import { OfficeConnect } from '../components/OfficeConnect';
+import { invoke } from '@tauri-apps/api/core';
 
 interface UserInfo {
   id:       string;
@@ -15,7 +17,20 @@ export function LoginPage() {
   const { login } = useAuth();
   const { t, tError } = useI18n();
   // On an office client profiles are made by an administrator (ADR-0031).
-  const client = useAppMode()?.mode === 'client';
+  const mode = useAppMode();
+  const client = mode?.mode === 'client';
+  const [connecting,   setConnecting]   = useState(false);
+  const [disconnected, setDisconnected] = useState(false);
+
+  async function disconnect() {
+    if (!window.confirm(t('office.disconnectConfirm', { server: mode?.server ?? '' }))) return;
+    try {
+      await invoke('cmd_office_set_mode', { target: 'single' });
+      setDisconnected(true);
+    } catch (err) {
+      setError(tError(err));
+    }
+  }
   const [users,       setUsers]       = useState<UserInfo[]>([]);
   const [selectedId,  setSelectedId]  = useState<string>('');
   const [pin,         setPin]         = useState('');
@@ -67,7 +82,22 @@ export function LoginPage() {
           <div className="login-subtitle">{t('login.subtitle')}</div>
         </div>
 
-        {!showCreate ? (
+        {disconnected ? (
+          <div>
+            <p className="text-sm" style={{ marginBottom: 14 }}>{t('office.restartToApply')}</p>
+            {error && <ErrorText>{error}</ErrorText>}
+            <Button
+              type="button"
+              fullWidth
+              style={{ justifyContent: 'center', padding: 11 }}
+              onClick={() => invoke('cmd_restart_app').catch(e => setError(tError(e)))}
+            >
+              {t('common.restartNow')}
+            </Button>
+          </div>
+        ) : connecting ? (
+          <OfficeConnect onBack={() => setConnecting(false)} />
+        ) : !showCreate ? (
           <form onSubmit={handleLogin}>
             <div style={{ marginBottom: 14 }}>
               <div className="form-label" style={{ marginBottom: 8 }}>{t('login.selectProfile')}</div>
@@ -120,17 +150,34 @@ export function LoginPage() {
             {client ? (
               <div className="text-sm text-muted" style={{ marginTop: 10, textAlign: 'center' }}>
                 {t('login.profilesOnServer')}
+                <div style={{ marginTop: 6 }}>
+                  {t('office.serverIs', { server: mode?.server ?? '' })}{' '}
+                  <button type="button" className="link-button" onClick={disconnect}>{t('office.disconnect')}</button>
+                </div>
               </div>
             ) : (
-              <Button
-                type="button"
-                variant="ghost"
-                fullWidth
-                style={{ justifyContent: 'center', marginTop: 8 }}
-                onClick={() => setShowCreate(true)}
-              >
-                {t('login.createNewProfile')}
-              </Button>
+              <>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  fullWidth
+                  style={{ justifyContent: 'center', marginTop: 8 }}
+                  onClick={() => setShowCreate(true)}
+                >
+                  {t('login.createNewProfile')}
+                </Button>
+                {mode?.mode === 'single' && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    fullWidth
+                    style={{ justifyContent: 'center', marginTop: 4 }}
+                    onClick={() => setConnecting(true)}
+                  >
+                    {t('office.connectToServer')}
+                  </Button>
+                )}
+              </>
             )}
           </form>
         ) : (
